@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ExpenseTracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { background: #030712; color: #f3f4f6; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    .loading-shell { padding: 2rem; color: #9ca3af; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "recharts": "https://esm.sh/recharts@2.12.7?deps=react@18.3.1",
+      "lucide-react": "https://esm.sh/lucide-react@0.428.0?deps=react@18.3.1"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="root">
+    <div class="loading-shell">Cargando ExpenseTracker… (esto carga React + Tailwind desde CDN la primera vez)</div>
+  </div>
+  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+  <script type="text/babel" data-type="module" data-presets="react">
+    import React, { useState, useEffect, useMemo, useCallback } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import {
+      BarChart, Bar, ResponsiveContainer, CartesianGrid, XAxis, YAxis,
+      Tooltip, Legend, Cell, PieChart, Pie,
+    } from 'recharts';
+    import {
+      Calendar, RefreshCw, Settings, AlertTriangle, ChevronRight, X,
+      TrendingUp, TrendingDown, Search, AlertCircle,
+    } from 'lucide-react';
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Config
+    // ────────────────────────────────────────────────────────────────────────
+
+    // Use the GitHub Contents API (NOT raw.githubusercontent.com). The raw
+    // host rejects CORS preflight when an Authorization header is involved,
+    // so browsers block the fetch. api.github.com has proper CORS for
+    // authenticated requests and returns the raw content when we send the
+    // Accept: application/vnd.github.raw header.
+    const DEFAULT_URL = 'https://api.github.com/repos/calvachesantiago/expensetracker-snapshots/contents/dashboard_snapshot.json';
+    const AUTO_REFRESH_MIN = 5;
+    const INCOME_CATS = new Set(['Salario', 'Ingresos extras', 'Reembolsos', 'Otros ingresos']);
+    const PARENT_COLORS = [
+      '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4',
+      '#ec4899', '#f97316', '#84cc16', '#a78bfa', '#22d3ee', '#fb7185',
+    ];
+
+    const fmtCOP = (n) => {
+      if (n === null || n === undefined || isNaN(n)) return '—';
+      const abs = Math.abs(n);
+      if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+      if (abs >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
+      return n.toLocaleString('es-CO');
+    };
+    const fmtCOPfull = (n) => {
+      if (n === null || n === undefined || isNaN(n)) return '—';
+      return `COP ${Math.round(n).toLocaleString('es-CO')}`;
+    };
+    const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
+
+    const budgetColor = (spendPct, daysPct) => {
+      if (spendPct >= 100) return 'bg-red-500';
+      const over = spendPct - daysPct;
+      if (over > 30) return 'bg-red-500';
+      if (over > 10) return 'bg-amber-500';
+      return 'bg-emerald-500';
+    };
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Data hook
+    // ────────────────────────────────────────────────────────────────────────
+
+    function useSnapshot(url, token) {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [lastFetched, setLastFetched] = useState(null);
+
+      const fetchData = useCallback(async () => {
+        setLoading(true); setError(null);
+        try {
+          const headers = { Accept: 'application/vnd.github.raw' };
+          if (token) headers.Authorization = `Bearer ${token}`;
+          const res = await fetch(url, { headers, cache: 'no-store' });
+          if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+          const json = await res.json();
+          setData(json); setLastFetched(new Date());
+          try { localStorage.setItem('et-cache', JSON.stringify(json)); } catch {}
+        } catch (e) {
+          try {
+            const cached = localStorage.getItem('et-cache');
+            if (cached) {
+              setData(JSON.parse(cached));
+              setError(`Live fetch failed (${e.message}); mostrando copia cacheada.`);
+            } else {
+              setError(e.message);
+            }
+          } catch { setError(e.message); }
+        } finally { setLoading(false); }
+      }, [url, token]);
+
+      useEffect(() => { fetchData(); }, [fetchData]);
+      useEffect(() => {
+        const t = setInterval(fetchData, AUTO_REFRESH_MIN * 60 * 1000);
+        return () => clearInterval(t);
+      }, [fetchData]);
+
+      return { data, loading, error, lastFetched, refetch: fetchData };
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Computations
+    // ────────────────────────────────────────────────────────────────────────
+
+    function lastNMonths(monthsList, n, anchor) {
+      const idx = monthsList.indexOf(anchor);
+      const end = idx >= 0 ? idx + 1 : monthsList.length;
+      return monthsList.slice(Math.max(0, end - n), end);
+    }
+
+    function computeMonthStats(data, month) {
+      const budgets = data.suggested_budgets || {};
+      const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
+
+      let spendTotal = 0, budgetTotal = 0;
+      const budgetRows = [];
+      for (const p of parents) {
+        const spend = (data.monthly_by_parent[p.name] || {})[month] || 0;
+        const budget = (budgets[p.name]?.suggested_budget) || 0;
+        spendTotal += spend; budgetTotal += budget;
+        if (spend > 0 || budget > 0) budgetRows.push({ name: p.name, spend, budget });
+      }
+      const uncat = (data.monthly_by_parent[''] || {})[month] || 0;
+      if (uncat > 0) {
+        spendTotal += uncat;
+        budgetRows.push({ name: 'Sin categoría', spend: uncat, budget: 0, isUncat: true });
+      }
+      budgetRows.sort((a, b) => {
+        const ap = a.budget > 0 ? a.spend / a.budget : 9999;
+        const bp = b.budget > 0 ? b.spend / b.budget : 9999;
+        return bp - ap;
+      });
+      const income = data.transactions
+        .filter((t) => t.ym === month && INCOME_CATS.has(t.parent))
+        .reduce((s, t) => s + t.amount, 0);
+
+      const [y, m] = month.split('-').map(Number);
+      const daysInMonth = new Date(y, m, 0).getDate();
+      const today = new Date();
+      const isCurrent = today.getFullYear() === y && today.getMonth() + 1 === m;
+      const dayOfMonth = isCurrent ? today.getDate() : daysInMonth;
+      const daysPct = Math.round((dayOfMonth / daysInMonth) * 100);
+      const projected = isCurrent && dayOfMonth > 0
+        ? Math.round((spendTotal / dayOfMonth) * daysInMonth) : spendTotal;
+
+      return { month, spendTotal, budgetTotal, income, net: income - spendTotal,
+               daysInMonth, dayOfMonth, daysPct, projected, budgetRows };
+    }
+
+    function computeYearStats(data, month) {
+      const year = month.slice(0, 4);
+      const monthsInYear = data.months.filter((m) => m.startsWith(year));
+      const budgets = data.suggested_budgets || {};
+      const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
+      let yearSpend = 0, yearBudget = 0;
+      for (const p of parents) {
+        yearBudget += ((budgets[p.name]?.suggested_budget) || 0) * 12;
+        for (const m of monthsInYear) yearSpend += (data.monthly_by_parent[p.name] || {})[m] || 0;
+      }
+      for (const m of monthsInYear) yearSpend += (data.monthly_by_parent[''] || {})[m] || 0;
+      const today = new Date();
+      const cy = today.getFullYear();
+      let elapsedPct;
+      if (parseInt(year) < cy) elapsedPct = 100;
+      else if (parseInt(year) > cy) elapsedPct = 0;
+      else {
+        const start = new Date(cy, 0, 1);
+        elapsedPct = Math.round((((today - start) / (1000 * 60 * 60 * 24)) / 365) * 100);
+      }
+      return { year, yearSpend, yearBudget, elapsedPct };
+    }
+
+    function computeAttention(data, month) {
+      const items = [];
+      const uncatCount = data.transactions.filter((t) => !t.category_id && t.source !== 'Form (Drive)').length;
+      if (uncatCount > 0) {
+        const rappi = data.transactions.filter((t) => !t.category_id && t.merchant?.toUpperCase().includes('RAPPI')).length;
+        const real = uncatCount - rappi;
+        if (real > 0) items.push({ severity: 'warn',
+          text: `${real} transacciones necesitan categoría`,
+          sub: 'Click para revisar (próximamente vía Telegram bot)' });
+        if (rappi > 0) items.push({ severity: 'info',
+          text: `${rappi} transacciones Rappi esperando el receipt parser`,
+          sub: 'Diseño: no auto-categorizar hasta tener el parser' });
+      }
+      const budgets = data.suggested_budgets || {};
+      const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
+      for (const p of parents) {
+        const spend = (data.monthly_by_parent[p.name] || {})[month] || 0;
+        const budget = (budgets[p.name]?.suggested_budget) || 0;
+        if (budget > 0 && spend / budget >= 1.0) {
+          items.push({ severity: 'warn',
+            text: `${p.name} está ${pct(spend, budget)}% del presupuesto en ${month}`,
+            sub: `${fmtCOPfull(spend)} / ${fmtCOPfull(budget)}` });
+        }
+      }
+      return { items };
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // App
+    // ────────────────────────────────────────────────────────────────────────
+
+    function ExpenseTrackerDashboard() {
+      const [url, setUrl] = useState(() => localStorage.getItem('et-url') || DEFAULT_URL);
+      const [token, setToken] = useState(() => localStorage.getItem('et-token') || '');
+      const [showSettings, setShowSettings] = useState(false);
+      const [tab, setTab] = useState('home');
+      const [month, setMonth] = useState(null);
+      const [selectedTx, setSelectedTx] = useState(null);
+
+      const { data, loading, error, lastFetched, refetch } = useSnapshot(url, token);
+
+      useEffect(() => {
+        if (data?.summary?.current_month && !month) setMonth(data.summary.current_month);
+      }, [data, month]);
+
+      useEffect(() => {
+        if (error && /401|403/.test(error) && !token) setShowSettings(true);
+      }, [error, token]);
+
+      if (loading && !data) {
+        return (
+          <div className="min-h-screen flex items-center justify-center">
+            <div className="text-gray-400 flex items-center gap-2">
+              <RefreshCw className="animate-spin" size={20} /> Cargando snapshot…
+            </div>
+          </div>
+        );
+      }
+      if (!data && error) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-6">
+            <div className="max-w-md bg-red-950/40 border border-red-900 rounded-xl p-6">
+              <AlertCircle size={32} className="text-red-400 mb-3" />
+              <h2 className="text-lg font-semibold mb-2">No pude cargar los datos</h2>
+              <p className="text-sm text-red-300 mb-4">{error}</p>
+              <button onClick={() => setShowSettings(true)}
+                      className="px-4 py-2 bg-red-900/50 hover:bg-red-900 rounded text-sm">
+                Configurar URL + token
+              </button>
+            </div>
+            {showSettings && (
+              <SettingsPanel url={url} setUrl={(u) => { setUrl(u); localStorage.setItem('et-url', u); }}
+                token={token} setToken={(t) => { setToken(t); localStorage.setItem('et-token', t); }}
+                onClose={() => setShowSettings(false)} onApply={refetch} />
+            )}
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen">
+          <Header data={data} month={month} setMonth={setMonth}
+            lastFetched={lastFetched} loading={loading}
+            onRefresh={refetch} onOpenSettings={() => setShowSettings(true)} />
+          <Tabs tab={tab} setTab={setTab} />
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 pb-24">
+            {error && (
+              <div className="mb-4 px-4 py-2 bg-amber-950/40 border border-amber-900 rounded text-sm text-amber-300 flex items-center gap-2">
+                <AlertTriangle size={14} /> {error}
+              </div>
+            )}
+            {tab === 'home' && <HomeView data={data} month={month} onSelectTx={setSelectedTx} />}
+            {tab === 'trends' && <TrendsView data={data} month={month} />}
+            {tab === 'budgets' && <BudgetsView data={data} />}
+            {tab === 'all' && <AllTxsView data={data} onSelectTx={setSelectedTx} />}
+          </main>
+          {selectedTx && <TxDetailDrawer tx={selectedTx} onClose={() => setSelectedTx(null)} />}
+          {showSettings && (
+            <SettingsPanel url={url} setUrl={(u) => { setUrl(u); localStorage.setItem('et-url', u); }}
+              token={token} setToken={(t) => { setToken(t); localStorage.setItem('et-token', t); }}
+              onClose={() => setShowSettings(false)} onApply={refetch} />
+          )}
+        </div>
+      );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Sub-components
+    // ────────────────────────────────────────────────────────────────────────
+
+    function Header({ data, month, setMonth, lastFetched, loading, onRefresh, onOpenSettings }) {
+      const months = data?.months || [];
+      const minutesAgo = lastFetched ? Math.floor((Date.now() - lastFetched.getTime()) / 60000) : null;
+      return (
+        <header className="sticky top-0 z-30 bg-gray-950/95 backdrop-blur border-b border-gray-800">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <h1 className="text-xl font-bold">ExpenseTracker</h1>
+              <span className="hidden sm:block text-xs text-gray-500">
+                {data?.summary?.first_month} → {data?.summary?.last_month}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <select value={month || ''} onChange={(e) => setMonth(e.target.value)}
+                className="bg-gray-900 border border-gray-800 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500">
+                {[...months].reverse().map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button onClick={onRefresh} disabled={loading}
+                className="flex items-center gap-1 px-2 py-1 bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded text-xs"
+                title={lastFetched ? `Última carga: ${lastFetched.toLocaleString()}` : 'Recargar'}>
+                <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+                <span className="hidden sm:inline">
+                  {minutesAgo === null ? 'Cargar' : minutesAgo < 1 ? 'ahora' : `${minutesAgo}m`}
+                </span>
+              </button>
+              <button onClick={onOpenSettings} className="p-1 hover:bg-gray-900 rounded" title="Configuración">
+                <Settings size={16} className="text-gray-400" />
+              </button>
+            </div>
+          </div>
+        </header>
+      );
+    }
+
+    function Tabs({ tab, setTab }) {
+      const tabs = [
+        { id: 'home', label: 'Inicio' },
+        { id: 'trends', label: 'Tendencias' },
+        { id: 'budgets', label: 'Presupuestos' },
+        { id: 'all', label: 'Todas las transacciones' },
+      ];
+      return (
+        <nav className="border-b border-gray-800 bg-gray-950/80">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-4 overflow-x-auto">
+            {tabs.map((t) => (
+              <button key={t.id} onClick={() => setTab(t.id)}
+                className={`py-3 text-sm whitespace-nowrap border-b-2 transition-colors ${
+                  tab === t.id ? 'border-blue-500 text-blue-400'
+                              : 'border-transparent text-gray-400 hover:text-gray-200'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </nav>
+      );
+    }
+
+    function HomeView({ data, month, onSelectTx }) {
+      if (!month) return null;
+      const stats = useMemo(() => computeMonthStats(data, month), [data, month]);
+      const yearStats = useMemo(() => computeYearStats(data, month), [data, month]);
+      const attention = useMemo(() => computeAttention(data, month), [data, month]);
+      return (
+        <div className="space-y-6">
+          <KPICards stats={stats} yearStats={yearStats} month={month} />
+          {attention.items.length > 0 && <NeedsAttention items={attention.items} />}
+          <BudgetTable rows={stats.budgetRows} />
+          <TrendsChart data={data} months={lastNMonths(data.months, 6, month)} />
+          <RecentActivity data={data} onSelectTx={onSelectTx} />
+        </div>
+      );
+    }
+
+    function KPICards({ stats, yearStats, month }) {
+      const monthPct = pct(stats.spendTotal, stats.budgetTotal);
+      const yearPct = pct(yearStats.yearSpend, yearStats.yearBudget);
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <KPICard title={`Este mes — ${month}`} primary={fmtCOPfull(stats.spendTotal)}
+            secondary={`de ${fmtCOPfull(stats.budgetTotal)} · ${monthPct}%`}
+            progress={Math.min(monthPct, 200)}
+            color={budgetColor(monthPct, stats.daysPct)}
+            footer={stats.dayOfMonth < stats.daysInMonth
+              ? `Día ${stats.dayOfMonth} de ${stats.daysInMonth} (${stats.daysPct}%) · Proyección: ${fmtCOPfull(stats.projected)}`
+              : `Mes cerrado`} />
+          <KPICard title={`Este año — ${yearStats.year}`} primary={fmtCOPfull(yearStats.yearSpend)}
+            secondary={`de ${fmtCOPfull(yearStats.yearBudget)} · ${yearPct}%`}
+            progress={Math.min(yearPct, 100)}
+            color={budgetColor(yearPct, yearStats.elapsedPct)}
+            footer={`${yearStats.elapsedPct}% del año transcurrido`} />
+          <KPICard title="Flujo de caja del mes" primary={fmtCOPfull(stats.net)}
+            secondary={`Ingresos ${fmtCOPfull(stats.income)} − Gastos ${fmtCOPfull(stats.spendTotal)}`}
+            progress={null}
+            color={stats.net >= 0 ? 'bg-emerald-500' : 'bg-red-500'}
+            footer={stats.net >= 0 ? '✓ En positivo' : '⚠ Gastos > ingresos'}
+            icon={stats.net >= 0 ? <TrendingUp size={20} /> : <TrendingDown size={20} />} />
+        </div>
+      );
+    }
+
+    function KPICard({ title, primary, secondary, progress, color, footer, icon }) {
+      return (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs uppercase tracking-wide text-gray-400">{title}</span>
+            {icon && <span className="text-gray-500">{icon}</span>}
+          </div>
+          <div className="text-2xl font-bold mb-1">{primary}</div>
+          <div className="text-sm text-gray-400 mb-3">{secondary}</div>
+          {progress !== null && (
+            <div className="h-2 bg-gray-800 rounded-full overflow-hidden mb-2">
+              <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${Math.min(progress, 100)}%` }} />
+            </div>
+          )}
+          <div className="text-xs text-gray-500">{footer}</div>
+        </div>
+      );
+    }
+
+    function NeedsAttention({ items }) {
+      return (
+        <section>
+          <h2 className="text-sm uppercase tracking-wide text-gray-400 mb-3">Necesita atención</h2>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl divide-y divide-gray-800">
+            {items.map((it, i) => (
+              <div key={i} className="px-4 py-3 flex items-start gap-3">
+                <span className="mt-0.5">
+                  {it.severity === 'warn'
+                    ? <AlertTriangle size={16} className="text-amber-400" />
+                    : <AlertCircle size={16} className="text-blue-400" />}
+                </span>
+                <div className="flex-1">
+                  <div className="text-sm">{it.text}</div>
+                  {it.sub && <div className="text-xs text-gray-500 mt-0.5">{it.sub}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      );
+    }
+
+    function BudgetTable({ rows }) {
+      return (
+        <section>
+          <h2 className="text-sm uppercase tracking-wide text-gray-400 mb-3">Presupuesto vs gasto — mes actual</h2>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            {rows.map((r) => {
+              const p = r.budget > 0 ? pct(r.spend, r.budget) : null;
+              const color = r.budget > 0 ? budgetColor(p, 50) : 'bg-gray-700';
+              return (
+                <div key={r.name} className="px-4 py-3 border-b border-gray-800 last:border-b-0">
+                  <div className="flex items-center justify-between text-sm mb-1">
+                    <span className={r.isUncat ? 'text-amber-400' : ''}>{r.name}</span>
+                    <span className="text-gray-400 text-xs">
+                      {fmtCOPfull(r.spend)} {r.budget > 0 && <span className="text-gray-600">/ {fmtCOPfull(r.budget)}</span>}
+                      {p !== null && (
+                        <span className={`ml-2 font-medium ${p >= 100 ? 'text-red-400' : p >= 80 ? 'text-amber-400' : 'text-emerald-400'}`}>{p}%</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div className={`h-full ${color} rounded-full transition-all`}
+                         style={{ width: `${r.budget > 0 ? Math.min(p, 100) : 100}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      );
+    }
+
+    function TrendsChart({ data, months }) {
+      const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
+      const chartData = months.map((m) => {
+        const row = { month: m };
+        parents.forEach((p) => { row[p.name] = (data.monthly_by_parent[p.name] || {})[m] || 0; });
+        return row;
+      });
+      return (
+        <section>
+          <h2 className="text-sm uppercase tracking-wide text-gray-400 mb-3">Tendencia — últimos 6 meses</h2>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="month" stroke="#6b7280" fontSize={11} />
+                <YAxis stroke="#6b7280" fontSize={11} tickFormatter={(v) => fmtCOP(v)} />
+                <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
+                         formatter={(v) => fmtCOPfull(v)} />
+                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
+                {parents.map((p, i) => (
+                  <Bar key={p.name} dataKey={p.name} stackId="a" fill={PARENT_COLORS[i % PARENT_COLORS.length]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+      );
+    }
+
+    function RecentActivity({ data, onSelectTx }) {
+      const recent = useMemo(() =>
+        [...data.transactions]
+          .sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')))
+          .slice(0, 30), [data]);
+      return (
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm uppercase tracking-wide text-gray-400">Actividad reciente</h2>
+            <span className="text-xs text-gray-500">últimas 30</span>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl divide-y divide-gray-800">
+            {recent.map((t) => <TxRow key={t.id} tx={t} onClick={() => onSelectTx(t)} />)}
+          </div>
+        </section>
+      );
+    }
+
+    function TxRow({ tx, onClick }) {
+      const isUncat = !tx.category_id;
+      const isIncome = INCOME_CATS.has(tx.parent);
+      return (
+        <button onClick={onClick}
+          className="w-full text-left px-4 py-2.5 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+          <div className="flex-shrink-0 text-xs text-gray-500 w-20">{tx.date}</div>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm truncate">{tx.merchant}</div>
+            <div className="text-xs text-gray-500 truncate">
+              {isUncat ? <span className="text-amber-500">⚠ sin categoría</span> : <span>{tx.label}</span>}
+            </div>
+          </div>
+          <div className={`text-sm font-medium ${isIncome ? 'text-emerald-400' : ''}`}>
+            {isIncome ? '+' : ''}{fmtCOPfull(tx.amount)}
+          </div>
+          <ChevronRight size={14} className="text-gray-600 flex-shrink-0" />
+        </button>
+      );
+    }
+
+    function TrendsView({ data, month }) {
+      const months12 = lastNMonths(data.months, 12, month);
+      const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
+      const chartData = months12.map((m) => {
+        const row = { month: m };
+        parents.forEach((p) => { row[p.name] = (data.monthly_by_parent[p.name] || {})[m] || 0; });
+        return row;
+      });
+      const pieData = parents
+        .map((p) => ({ name: p.name, value: (data.monthly_by_parent[p.name] || {})[month] || 0 }))
+        .filter((d) => d.value > 0)
+        .sort((a, b) => b.value - a.value);
+      return (
+        <div className="space-y-6">
+          <section>
+            <h2 className="text-sm uppercase tracking-wide text-gray-400 mb-3">12 meses — apilado por categoría</h2>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+              <ResponsiveContainer width="100%" height={360}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                  <XAxis dataKey="month" stroke="#6b7280" fontSize={11} />
+                  <YAxis stroke="#6b7280" fontSize={11} tickFormatter={(v) => fmtCOP(v)} />
+                  <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
+                           formatter={(v) => fmtCOPfull(v)} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  {parents.map((p, i) => (
+                    <Bar key={p.name} dataKey={p.name} stackId="a" fill={PARENT_COLORS[i % PARENT_COLORS.length]} />
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+          <section>
+            <h2 className="text-sm uppercase tracking-wide text-gray-400 mb-3">Distribución en {month}</h2>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+              <ResponsiveContainer width="100%" height={320}>
+                <PieChart>
+                  <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={110}
+                       label={(d) => d.name}>
+                    {pieData.map((_, i) => <Cell key={i} fill={PARENT_COLORS[i % PARENT_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
+                           formatter={(v) => fmtCOPfull(v)} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    function BudgetsView({ data }) {
+      const budgets = data.suggested_budgets || {};
+      const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
+      const rows = parents.map((p) => {
+        const b = budgets[p.name] || {};
+        return { name: p.name, budget: b.suggested_budget || 0, median: b.median_monthly || 0,
+                 source: b.source || '—', monthsUsed: b.months_used || 0 };
+      }).sort((a, b) => b.budget - a.budget);
+      return (
+        <section>
+          <h2 className="text-sm uppercase tracking-wide text-gray-400 mb-3">Presupuestos mensuales</h2>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-800/50 text-xs uppercase text-gray-400">
+                <tr>
+                  <th className="text-left px-4 py-2">Categoría</th>
+                  <th className="text-right px-4 py-2">Presupuesto</th>
+                  <th className="text-right px-4 py-2 hidden sm:table-cell">Mediana</th>
+                  <th className="text-right px-4 py-2 hidden md:table-cell">Origen</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800">
+                {rows.map((r) => (
+                  <tr key={r.name} className="hover:bg-gray-800/30">
+                    <td className="px-4 py-2">{r.name}</td>
+                    <td className="px-4 py-2 text-right font-medium">{fmtCOPfull(r.budget)}</td>
+                    <td className="px-4 py-2 text-right text-gray-400 hidden sm:table-cell">{fmtCOPfull(r.median)}</td>
+                    <td className="px-4 py-2 text-right hidden md:table-cell">
+                      <span className={`px-2 py-0.5 rounded text-xs ${
+                        r.source === 'user' ? 'bg-blue-900/40 text-blue-300' : 'bg-gray-800 text-gray-400'}`}>
+                        {r.source === 'user' ? 'override' : 'derivado'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-gray-500 mt-3">
+            Editar presupuestos: modificar <code className="px-1 py-0.5 bg-gray-800 rounded">budgets.json</code> en
+            el Mac y re-ejecutar <code className="px-1 py-0.5 bg-gray-800 rounded">./push_snapshot.sh</code>.
+          </p>
+        </section>
+      );
+    }
+
+    function AllTxsView({ data, onSelectTx }) {
+      const [q, setQ] = useState('');
+      const [parentFilter, setParentFilter] = useState('');
+      const [showUncatOnly, setShowUncatOnly] = useState(false);
+      const parents = (data.categories?.parents || []).map((p) => p.name);
+      const filtered = useMemo(() => {
+        const qLow = q.trim().toLowerCase();
+        return data.transactions
+          .filter((t) => {
+            if (showUncatOnly && t.category_id) return false;
+            if (parentFilter && t.parent !== parentFilter) return false;
+            if (qLow && !(t.merchant?.toLowerCase().includes(qLow)
+                || t.label?.toLowerCase().includes(qLow)
+                || t.notes?.toLowerCase().includes(qLow))) return false;
+            return true;
+          })
+          .sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')));
+      }, [data, q, parentFilter, showUncatOnly]);
+      return (
+        <section className="space-y-3">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="flex-1 relative">
+              <Search size={14} className="absolute left-3 top-3 text-gray-500" />
+              <input type="text" value={q} onChange={(e) => setQ(e.target.value)}
+                placeholder="Buscar por comercio, categoría, notas…"
+                className="w-full bg-gray-900 border border-gray-800 rounded pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-blue-500"/>
+            </div>
+            <select value={parentFilter} onChange={(e) => setParentFilter(e.target.value)}
+              className="bg-gray-900 border border-gray-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+              <option value="">Todas las categorías</option>
+              {parents.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <label className="flex items-center gap-2 text-sm px-3 bg-gray-900 border border-gray-800 rounded">
+              <input type="checkbox" checked={showUncatOnly} onChange={(e) => setShowUncatOnly(e.target.checked)} />
+              Sin categoría
+            </label>
+          </div>
+          <div className="text-xs text-gray-500">{filtered.length} transacciones</div>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl divide-y divide-gray-800">
+            {filtered.slice(0, 300).map((t) => <TxRow key={t.id} tx={t} onClick={() => onSelectTx(t)} />)}
+            {filtered.length > 300 && (
+              <div className="px-4 py-3 text-xs text-gray-500 text-center">
+                Mostrando las primeras 300 — refina la búsqueda para ver más.
+              </div>
+            )}
+          </div>
+        </section>
+      );
+    }
+
+    function TxDetailDrawer({ tx, onClose }) {
+      return (
+        <div className="fixed inset-0 z-50 flex" onClick={onClose}>
+          <div className="flex-1 bg-black/50" />
+          <div className="w-full sm:w-[28rem] bg-gray-900 border-l border-gray-800 overflow-y-auto"
+               onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gray-900 border-b border-gray-800 px-5 py-4 flex items-center justify-between">
+              <h3 className="font-semibold">Detalle de transacción</h3>
+              <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4 text-sm">
+              <DetailRow label="Comercio" value={tx.merchant} />
+              <DetailRow label="Monto" value={fmtCOPfull(tx.amount)} />
+              <DetailRow label="Fecha" value={tx.date + (tx.time ? ` ${tx.time}` : '')} />
+              <DetailRow label="Categoría"
+                value={tx.category_id ? tx.label : <span className="text-amber-400">Sin categoría</span>} />
+              <DetailRow label="Origen" value={tx.source} />
+              <DetailRow label="Método de pago" value={tx.payment_method || '—'} />
+              {tx.notes && <DetailRow label="Notas" value={tx.notes} />}
+              <div className="pt-4 border-t border-gray-800">
+                <p className="text-xs text-gray-500">
+                  Para editar: usar el bot de Telegram (próximamente). Mientras tanto, vía
+                  <code className="ml-1 px-1 py-0.5 bg-gray-800 rounded">python3 v3/override_tx.py {tx.id} …</code>
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function DetailRow({ label, value }) {
+      return (
+        <div className="flex justify-between gap-4">
+          <span className="text-gray-400 flex-shrink-0">{label}</span>
+          <span className="text-right">{value}</span>
+        </div>
+      );
+    }
+
+    function SettingsPanel({ url, setUrl, token, setToken, onClose, onApply }) {
+      const [u, setU] = useState(url);
+      const [t, setT] = useState(token);
+      const [showToken, setShowToken] = useState(false);
+      const apply = () => { setUrl(u); setToken(t); onApply(); onClose(); };
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+              <h3 className="font-semibold">Configuración</h3>
+              <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4 text-sm">
+              <label className="block">
+                <span className="text-xs uppercase tracking-wide text-gray-400">URL del snapshot</span>
+                <input type="text" value={u} onChange={(e) => setU(e.target.value)}
+                  className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
+              </label>
+              <label className="block">
+                <span className="text-xs uppercase tracking-wide text-gray-400">Token (GitHub read-only)</span>
+                <div className="flex gap-2 mt-1">
+                  <input type={showToken ? 'text' : 'password'} value={t} onChange={(e) => setT(e.target.value)}
+                    placeholder="github_pat_..."
+                    className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
+                  <button onClick={() => setShowToken(!showToken)}
+                          className="px-2 bg-gray-800 border border-gray-700 rounded text-xs">
+                    {showToken ? '🙈' : '👁'}
+                  </button>
+                </div>
+                <span className="text-xs text-gray-500 block mt-1">
+                  Solo lectura; queda en localStorage del navegador.
+                </span>
+              </label>
+              <div className="text-xs text-gray-500 pt-2 border-t border-gray-800">
+                <p>Auto-refresh: cada {AUTO_REFRESH_MIN} minutos.</p>
+                <p className="mt-1">Actualizar datos en el Mac: <code className="px-1 py-0.5 bg-gray-800 rounded">./push_snapshot.sh</code></p>
+              </div>
+            </div>
+            <div className="px-5 py-4 border-t border-gray-800 flex justify-end gap-2">
+              <button onClick={onClose} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm">Cancelar</button>
+              <button onClick={apply} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm">Aplicar y recargar</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Mount
+    // ────────────────────────────────────────────────────────────────────────
+
+    const root = createRoot(document.getElementById('root'));
+    root.render(<ExpenseTrackerDashboard />);
+  </script>
+</body>
+</html>
