@@ -374,7 +374,7 @@
           <KPICards stats={stats} yearStats={yearStats} month={month} />
           {attention.categorization.length > 0 && <NeedsAttention items={attention.categorization} />}
           {attention.overBudget.length > 0 && <OverBudgetMini items={attention.overBudget} month={month} />}
-          <BudgetTable rows={stats.budgetRows} />
+          <BudgetTable rows={stats.budgetRows} data={data} month={month} />
           <TrendsChart data={data} months={lastNMonths(data.months, 6, month)} />
           <RecentActivity data={data} onSelectTx={onSelectTx} />
         </div>
@@ -473,7 +473,27 @@
       );
     }
 
-    function BudgetTable({ rows }) {
+    function BudgetTable({ rows, data, month }) {
+      const [expanded, setExpanded] = useState(new Set());
+      const toggle = (name) => {
+        const next = new Set(expanded);
+        if (next.has(name)) next.delete(name); else next.add(name);
+        setExpanded(next);
+      };
+
+      // For each parent, find its subs from monthly_by_sub for the current month
+      const subsForParent = (parentName) => {
+        const out = [];
+        const prefix = `${parentName} / `;
+        for (const [key, byMonth] of Object.entries(data.monthly_by_sub || {})) {
+          if (!key.startsWith(prefix)) continue;
+          const spend = byMonth[month] || 0;
+          if (spend <= 0) continue;
+          out.push({ name: key.slice(prefix.length), spend });
+        }
+        return out.sort((a, b) => b.spend - a.spend);
+      };
+
       return (
         <section>
           <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Presupuesto vs gasto — mes actual</h2>
@@ -481,21 +501,50 @@
             {rows.map((r) => {
               const p = r.budget > 0 ? pct(r.spend, r.budget) : null;
               const color = r.budget > 0 ? budgetColor(p, 50) : 'bg-gray-700';
+              const isOpen = expanded.has(r.name);
+              const subs = isOpen ? subsForParent(r.name) : [];
               return (
-                <div key={r.name} className="px-3 py-2 border-b border-gray-800 last:border-b-0">
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span>{r.name}</span>
-                    <span className="text-gray-400 text-[11px]">
-                      {fmtCOPfull(r.spend)} {r.budget > 0 && <span className="text-gray-600">/ {fmtCOPfull(r.budget)}</span>}
-                      {p !== null && (
-                        <span className={`ml-2 font-medium ${p >= 100 ? 'text-red-400' : p >= 80 ? 'text-amber-400' : 'text-emerald-400'}`}>{p}%</span>
+                <div key={r.name} className="border-b border-gray-800 last:border-b-0">
+                  <button
+                    onClick={() => toggle(r.name)}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-800/30 transition-colors"
+                  >
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="flex items-center gap-1.5">
+                        <ChevronRight size={11}
+                          className={`text-gray-600 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                        {r.name}
+                      </span>
+                      <span className="text-gray-400 text-[11px]">
+                        {fmtCOPfull(r.spend)} {r.budget > 0 && <span className="text-gray-600">/ {fmtCOPfull(r.budget)}</span>}
+                        {p !== null && (
+                          <span className={`ml-2 font-medium ${p >= 100 ? 'text-red-400' : p >= 80 ? 'text-amber-400' : 'text-emerald-400'}`}>{p}%</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
+                      <div className={`h-full ${color} rounded-full transition-all`}
+                           style={{ width: `${r.budget > 0 ? Math.min(p, 100) : 100}%` }} />
+                    </div>
+                  </button>
+                  {isOpen && (
+                    <div className="bg-gray-950/50 border-t border-gray-800 px-3 py-1.5">
+                      {subs.length === 0 ? (
+                        <div className="text-[10px] text-gray-600 py-1">(sin gasto en subcategorías este mes)</div>
+                      ) : (
+                        subs.map((s) => {
+                          const sharePct = r.spend > 0 ? Math.round((s.spend / r.spend) * 100) : 0;
+                          return (
+                            <div key={s.name} className="flex items-center gap-2 py-1">
+                              <div className="flex-1 text-[11px] text-gray-300">{s.name}</div>
+                              <div className="text-[10px] text-gray-500 w-10 text-right">{sharePct}%</div>
+                              <div className="text-[11px] text-gray-400 w-28 text-right">{fmtCOPfull(s.spend)}</div>
+                            </div>
+                          );
+                        })
                       )}
-                    </span>
-                  </div>
-                  <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
-                    <div className={`h-full ${color} rounded-full transition-all`}
-                         style={{ width: `${r.budget > 0 ? Math.min(p, 100) : 100}%` }} />
-                  </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
