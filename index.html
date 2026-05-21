@@ -191,30 +191,36 @@
     }
 
     function computeAttention(data, month) {
-      const items = [];
+      // Categorization items (the main "needs attention" pile)
+      const categorization = [];
       const uncatCount = data.transactions.filter((t) => !t.category_id && t.source !== 'Form (Drive)').length;
       if (uncatCount > 0) {
         const rappi = data.transactions.filter((t) => !t.category_id && t.merchant?.toUpperCase().includes('RAPPI')).length;
         const real = uncatCount - rappi;
-        if (real > 0) items.push({ severity: 'warn',
+        if (real > 0) categorization.push({ severity: 'warn',
           text: `${real} transacciones necesitan categoría`,
-          sub: 'Click para revisar (próximamente vía Telegram bot)' });
-        if (rappi > 0) items.push({ severity: 'info',
-          text: `${rappi} transacciones Rappi esperando el receipt parser`,
-          sub: 'Diseño: no auto-categorizar hasta tener el parser' });
+          sub: 'Próximamente vía Telegram bot' });
+        if (rappi > 0) categorization.push({ severity: 'info',
+          text: `${rappi} transacciones Rappi esperando el receipt parser` });
       }
+
+      // Budget overages (rendered as a smaller, secondary list)
+      const overBudget = [];
       const budgets = data.suggested_budgets || {};
       const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
       for (const p of parents) {
         const spend = (data.monthly_by_parent[p.name] || {})[month] || 0;
         const budget = (budgets[p.name]?.suggested_budget) || 0;
         if (budget > 0 && spend / budget >= 1.0) {
-          items.push({ severity: 'warn',
-            text: `${p.name} está ${pct(spend, budget)}% del presupuesto en ${month}`,
-            sub: `${fmtCOPfull(spend)} / ${fmtCOPfull(budget)}` });
+          overBudget.push({
+            name: p.name, pct: pct(spend, budget),
+            spend, budget,
+          });
         }
       }
-      return { items };
+      overBudget.sort((a, b) => b.pct - a.pct);
+
+      return { categorization, overBudget };
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -365,11 +371,35 @@
       return (
         <div className="space-y-6">
           <KPICards stats={stats} yearStats={yearStats} month={month} />
-          {attention.items.length > 0 && <NeedsAttention items={attention.items} />}
+          {attention.categorization.length > 0 && <NeedsAttention items={attention.categorization} />}
+          {attention.overBudget.length > 0 && <OverBudgetMini items={attention.overBudget} month={month} />}
           <BudgetTable rows={stats.budgetRows} />
           <TrendsChart data={data} months={lastNMonths(data.months, 6, month)} />
           <RecentActivity data={data} onSelectTx={onSelectTx} />
         </div>
+      );
+    }
+
+    function OverBudgetMini({ items, month }) {
+      return (
+        <section>
+          <h2 className="text-xs uppercase tracking-wide text-gray-500 mb-2">
+            Por encima del presupuesto en {month}
+          </h2>
+          <div className="bg-gray-900/60 border border-gray-800 rounded-lg px-3 py-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+            {items.map((it) => (
+              <span key={it.name} className="text-gray-400">
+                <span className="text-gray-200">{it.name}</span>
+                {' '}
+                <span className={it.pct >= 200 ? 'text-red-400' : 'text-amber-400'}>
+                  {it.pct}%
+                </span>
+                {' '}
+                <span className="text-gray-500">({fmtCOPfull(it.spend)} / {fmtCOPfull(it.budget)})</span>
+              </span>
+            ))}
+          </div>
+        </section>
       );
     }
 
@@ -503,19 +533,29 @@
     }
 
     function RecentActivity({ data, onSelectTx }) {
+      const [expanded, setExpanded] = useState(false);
+      const visible = expanded ? 25 : 8;
       const recent = useMemo(() =>
         [...data.transactions]
           .sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')))
-          .slice(0, 30), [data]);
+          .slice(0, visible), [data, visible]);
       return (
         <section>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm uppercase tracking-wide text-gray-400">Actividad reciente</h2>
-            <span className="text-xs text-gray-500">últimas 30</span>
+            <button
+              onClick={() => setExpanded(!expanded)}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              {expanded ? `mostrar 8` : `mostrar más`}
+            </button>
           </div>
           <div className="bg-gray-900 border border-gray-800 rounded-xl divide-y divide-gray-800">
             {recent.map((t) => <TxRow key={t.id} tx={t} onClick={() => onSelectTx(t)} />)}
           </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Para ver todas, usa la pestaña <span className="text-gray-400">Todas las transacciones</span>.
+          </p>
         </section>
       );
     }
