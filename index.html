@@ -35,7 +35,7 @@
     } from 'recharts';
     import {
       Calendar, RefreshCw, Settings, AlertTriangle, ChevronRight, X,
-      TrendingUp, TrendingDown, Search, AlertCircle,
+      TrendingUp, TrendingDown, Search, AlertCircle, Plus, Edit2, Trash2,
     } from 'lucide-react';
 
     // ────────────────────────────────────────────────────────────────────────
@@ -48,6 +48,7 @@
     // authenticated requests and returns the raw content when we send the
     // Accept: application/vnd.github.raw header.
     const DEFAULT_URL = 'https://api.github.com/repos/calvachesantiago/expensetracker-snapshots/contents/dashboard_snapshot.json';
+    const DEFAULT_WORKER_URL = 'https://kikito.calvachesantiago.workers.dev';
     const AUTO_REFRESH_MIN = 5;
     const INCOME_CATS = new Set(['Salario', 'Ingresos extras', 'Reembolsos', 'Otros ingresos']);
     const PARENT_COLORS = [
@@ -231,12 +232,46 @@
     function ExpenseTrackerDashboard() {
       const [url, setUrl] = useState(() => localStorage.getItem('et-url') || DEFAULT_URL);
       const [token, setToken] = useState(() => localStorage.getItem('et-token') || '');
+      const [workerUrl, setWorkerUrl] = useState(() => localStorage.getItem('et-worker-url') || DEFAULT_WORKER_URL);
+      const [workerSecret, setWorkerSecret] = useState(() => localStorage.getItem('et-worker-secret') || '');
+      const [userIdentity, setUserIdentity] = useState(() => localStorage.getItem('et-user') || 'santi');
       const [showSettings, setShowSettings] = useState(false);
+      const [showAddTx, setShowAddTx] = useState(false);
       const [tab, setTab] = useState('home');
       const [month, setMonth] = useState(null);
       const [selectedTx, setSelectedTx] = useState(null);
+      const [toast, setToast] = useState(null);
 
       const { data, loading, error, lastFetched, refetch } = useSnapshot(url, token);
+
+      // Helper: POST an edit to the Worker
+      const postEdit = useCallback(async (edit) => {
+        if (!workerSecret) {
+          setToast({ type: 'error', text: 'Configura el secret del Worker en ⚙' });
+          return false;
+        }
+        try {
+          const fullEdit = { ...edit, by_user: userIdentity };
+          const res = await fetch(`${workerUrl}/edit`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${workerSecret}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(fullEdit),
+          });
+          if (!res.ok) {
+            const txt = await res.text();
+            setToast({ type: 'error', text: `Error ${res.status}: ${txt.slice(0, 80)}` });
+            return false;
+          }
+          setToast({ type: 'ok', text: '✅ En cola — se aplica en próxima sync' });
+          return true;
+        } catch (e) {
+          setToast({ type: 'error', text: `Error de red: ${e.message}` });
+          return false;
+        }
+      }, [workerUrl, workerSecret, userIdentity]);
 
       useEffect(() => {
         if (data?.summary?.current_month && !month) setMonth(data.summary.current_month);
@@ -280,7 +315,8 @@
         <div className="min-h-screen">
           <Header data={data} month={month} setMonth={setMonth}
             lastFetched={lastFetched} loading={loading}
-            onRefresh={refetch} onOpenSettings={() => setShowSettings(true)} />
+            onRefresh={refetch} onOpenSettings={() => setShowSettings(true)}
+            onAddTx={() => setShowAddTx(true)} />
           <Tabs tab={tab} setTab={setTab} />
           <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 pb-24">
             {error && (
@@ -293,12 +329,40 @@
             {tab === 'budgets' && <BudgetsView data={data} />}
             {tab === 'all' && <AllTxsView data={data} onSelectTx={setSelectedTx} />}
           </main>
-          {selectedTx && <TxDetailDrawer tx={selectedTx} onClose={() => setSelectedTx(null)} />}
+          {selectedTx && (
+            <TxDetailDrawer
+              tx={selectedTx} data={data}
+              onClose={() => setSelectedTx(null)}
+              postEdit={postEdit}
+            />
+          )}
+          {showAddTx && (
+            <AddTxModal data={data} userIdentity={userIdentity}
+              onClose={() => setShowAddTx(false)} postEdit={postEdit} />
+          )}
           {showSettings && (
-            <SettingsPanel url={url} setUrl={(u) => { setUrl(u); localStorage.setItem('et-url', u); }}
+            <SettingsPanel
+              url={url} setUrl={(u) => { setUrl(u); localStorage.setItem('et-url', u); }}
               token={token} setToken={(t) => { setToken(t); localStorage.setItem('et-token', t); }}
+              workerUrl={workerUrl} setWorkerUrl={(u) => { setWorkerUrl(u); localStorage.setItem('et-worker-url', u); }}
+              workerSecret={workerSecret} setWorkerSecret={(s) => { setWorkerSecret(s); localStorage.setItem('et-worker-secret', s); }}
+              userIdentity={userIdentity} setUserIdentity={(u) => { setUserIdentity(u); localStorage.setItem('et-user', u); }}
               onClose={() => setShowSettings(false)} onApply={refetch} />
           )}
+          {toast && <Toast toast={toast} onDismiss={() => setToast(null)} />}
+        </div>
+      );
+    }
+
+    function Toast({ toast, onDismiss }) {
+      useEffect(() => {
+        const t = setTimeout(onDismiss, 4000);
+        return () => clearTimeout(t);
+      }, [onDismiss]);
+      const bg = toast.type === 'ok' ? 'bg-emerald-700 border-emerald-600' : 'bg-red-800 border-red-700';
+      return (
+        <div className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 ${bg} border rounded-lg px-4 py-2 text-sm shadow-lg max-w-md`}>
+          {toast.text}
         </div>
       );
     }
@@ -307,7 +371,7 @@
     // Sub-components
     // ────────────────────────────────────────────────────────────────────────
 
-    function Header({ data, month, setMonth, lastFetched, loading, onRefresh, onOpenSettings }) {
+    function Header({ data, month, setMonth, lastFetched, loading, onRefresh, onOpenSettings, onAddTx }) {
       const months = data?.months || [];
       const minutesAgo = lastFetched ? Math.floor((Date.now() - lastFetched.getTime()) / 60000) : null;
       return (
@@ -324,6 +388,12 @@
                 className="bg-gray-900 border border-gray-800 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500">
                 {[...months].reverse().map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
+              <button onClick={onAddTx}
+                className="flex items-center gap-1 px-2 py-1 bg-blue-700 hover:bg-blue-600 border border-blue-600 rounded text-xs font-medium"
+                title="Agregar cash o ingreso">
+                <Plus size={12} />
+                <span className="hidden sm:inline">Agregar</span>
+              </button>
               <button onClick={onRefresh} disabled={loading}
                 className="flex items-center gap-1 px-2 py-1 bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded text-xs"
                 title={lastFetched ? `Última carga: ${lastFetched.toLocaleString()}` : 'Recargar'}>
@@ -778,31 +848,238 @@
       );
     }
 
-    function TxDetailDrawer({ tx, onClose }) {
+    function TxDetailDrawer({ tx, data, onClose, postEdit }) {
+      const [editing, setEditing] = useState(false);
+      const [path, setPath] = useState(tx.label || '');
+      const [amount, setAmount] = useState(tx.amount);
+      const [note, setNote] = useState(tx.notes || '');
+      const [addedBy, setAddedBy] = useState(tx.added_by || '');
+      const [submitting, setSubmitting] = useState(false);
+
+      const allPaths = useMemo(() => {
+        const out = new Set();
+        const parents = data.categories?.parents || [];
+        for (const p of parents) {
+          out.add(p.name);
+          for (const s of (p.subs || [])) out.add(`${p.name} / ${s.name}`);
+        }
+        return [...out].sort();
+      }, [data]);
+
+      const submit = async (kindAndExtra) => {
+        setSubmitting(true);
+        const ok = await postEdit({ ...kindAndExtra, tx_id: tx.id });
+        setSubmitting(false);
+        if (ok) { onClose(); }
+      };
+
+      const saveAll = async () => {
+        // Send each change as its own edit (the queue applies them in order)
+        if (path !== tx.label) {
+          await submit({ kind: 'recategorize', path });
+          return;
+        }
+        if (amount !== tx.amount) {
+          await submit({ kind: 'edit_amount', amount: parseInt(amount, 10) });
+          return;
+        }
+        if (note !== (tx.notes || '')) {
+          await submit({ kind: 'edit_note', note });
+          return;
+        }
+        if (addedBy !== (tx.added_by || '')) {
+          await submit({ kind: 'tag', added_by: addedBy || null });
+          return;
+        }
+        setToast?.({ type: 'ok', text: 'No hay cambios' });
+        onClose();
+      };
+
       return (
         <div className="fixed inset-0 z-50 flex" onClick={onClose}>
           <div className="flex-1 bg-black/50" />
           <div className="w-full sm:w-[28rem] bg-gray-900 border-l border-gray-800 overflow-y-auto"
                onClick={(e) => e.stopPropagation()}>
-            <div className="sticky top-0 bg-gray-900 border-b border-gray-800 px-5 py-4 flex items-center justify-between">
-              <h3 className="font-semibold">Detalle de transacción</h3>
-              <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={18} /></button>
+            <div className="sticky top-0 bg-gray-900 border-b border-gray-800 px-5 py-3 flex items-center justify-between">
+              <h3 className="font-semibold text-sm">Transacción #{tx.id}</h3>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setEditing(!editing)}
+                        className={`text-xs px-2 py-1 rounded ${editing ? 'bg-gray-700' : 'bg-blue-700 hover:bg-blue-600'}`}>
+                  {editing ? 'Cancelar' : 'Editar'}
+                </button>
+                <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={18} /></button>
+              </div>
             </div>
-            <div className="p-5 space-y-4 text-sm">
+
+            <div className="p-4 space-y-3 text-sm">
               <DetailRow label="Comercio" value={tx.merchant} />
-              <DetailRow label="Monto" value={fmtCOPfull(tx.amount)} />
+              {!editing && <DetailRow label="Monto" value={fmtCOPfull(tx.amount)} />}
               <DetailRow label="Fecha" value={tx.date + (tx.time ? ` ${tx.time}` : '')} />
-              <DetailRow label="Categoría"
-                value={tx.category_id ? tx.label : <span className="text-amber-400">Sin categoría</span>} />
+              {!editing && <DetailRow label="Categoría"
+                value={tx.category_id ? tx.label : <span className="text-amber-400">Sin categoría</span>} />}
+              {!editing && <DetailRow label="Atribución"
+                value={tx.added_by ? <span className="text-blue-300">{tx.added_by}</span> : <span className="text-gray-500">— (compartido / sin etiqueta)</span>} />}
               <DetailRow label="Origen" value={tx.source} />
-              <DetailRow label="Método de pago" value={tx.payment_method || '—'} />
-              {tx.notes && <DetailRow label="Notas" value={tx.notes} />}
-              <div className="pt-4 border-t border-gray-800">
-                <p className="text-xs text-gray-500">
-                  Para editar: usar el bot de Telegram (próximamente). Mientras tanto, vía
-                  <code className="ml-1 px-1 py-0.5 bg-gray-800 rounded">python3 v3/override_tx.py {tx.id} …</code>
+              <DetailRow label="Pago" value={tx.payment_method || '—'} />
+              {!editing && tx.notes && <DetailRow label="Notas" value={tx.notes} />}
+
+              {editing && (
+                <div className="mt-4 pt-4 border-t border-gray-800 space-y-3">
+                  <label className="block">
+                    <span className="text-[11px] uppercase tracking-wide text-gray-400">Categoría</span>
+                    <input type="text" list="path-suggestions" value={path}
+                      onChange={(e) => setPath(e.target.value)}
+                      className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs" />
+                    <datalist id="path-suggestions">
+                      {allPaths.map((p) => <option key={p} value={p} />)}
+                    </datalist>
+                  </label>
+
+                  <label className="block">
+                    <span className="text-[11px] uppercase tracking-wide text-gray-400">Monto (COP)</span>
+                    <input type="number" value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs" />
+                  </label>
+
+                  <label className="block">
+                    <span className="text-[11px] uppercase tracking-wide text-gray-400">Atribución</span>
+                    <select value={addedBy} onChange={(e) => setAddedBy(e.target.value)}
+                      className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs">
+                      <option value="">— (compartido / sin etiqueta)</option>
+                      <option value="santi">Santi</option>
+                      <option value="lau">Lau</option>
+                    </select>
+                  </label>
+
+                  <label className="block">
+                    <span className="text-[11px] uppercase tracking-wide text-gray-400">Nota</span>
+                    <input type="text" value={note} onChange={(e) => setNote(e.target.value)}
+                      className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs" />
+                  </label>
+
+                  <button onClick={saveAll} disabled={submitting}
+                    className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-medium">
+                    {submitting ? 'Enviando…' : 'Guardar cambios'}
+                  </button>
+
+                  <div className="pt-3 border-t border-gray-800 grid grid-cols-2 gap-2">
+                    <button onClick={() => submit({ kind: 'not_mine' })}
+                            disabled={submitting}
+                            className="px-3 py-2 bg-amber-900/40 hover:bg-amber-900/60 border border-amber-800 rounded text-xs">
+                      🚫 No fue mío
+                    </button>
+                    <button onClick={() => {
+                      const v = prompt('¿Cuánto me deben los demás? (COP)');
+                      if (v) submit({ kind: 'split', split_owed: parseInt(v, 10) });
+                    }}
+                            disabled={submitting}
+                            className="px-3 py-2 bg-amber-900/40 hover:bg-amber-900/60 border border-amber-800 rounded text-xs">
+                      ➗ Split parcial
+                    </button>
+                    <button onClick={() => {
+                      if (confirm('Borrar transacción (soft delete)?')) submit({ kind: 'delete' });
+                    }}
+                            disabled={submitting}
+                            className="col-span-2 px-3 py-2 bg-red-900/40 hover:bg-red-900/60 border border-red-800 rounded text-xs">
+                      🗑 Borrar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-3 mt-3 border-t border-gray-800">
+                <p className="text-[10px] text-gray-500">
+                  Los cambios se envían a Kikito (Worker en Cloudflare) y se aplican en la próxima sync (8am / 8pm).
                 </p>
               </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function AddTxModal({ data, userIdentity, onClose, postEdit }) {
+      const [kind, setKind] = useState('add_cash');  // or 'add_income'
+      const [amount, setAmount] = useState('');
+      const [path, setPath] = useState('');
+      const [note, setNote] = useState('');
+      const [submitting, setSubmitting] = useState(false);
+
+      const allPaths = useMemo(() => {
+        const out = new Set();
+        const parents = data.categories?.parents || [];
+        for (const p of parents) {
+          out.add(p.name);
+          for (const s of (p.subs || [])) out.add(`${p.name} / ${s.name}`);
+        }
+        return [...out].sort();
+      }, [data]);
+
+      const submit = async () => {
+        if (!amount || !path) return;
+        setSubmitting(true);
+        const ok = await postEdit({
+          kind, amount: parseInt(amount, 10), path, note: note.trim(),
+        });
+        setSubmitting(false);
+        if (ok) onClose();
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
+              <h3 className="font-semibold">Agregar transacción</h3>
+              <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-3 text-sm">
+              <div className="flex gap-2">
+                <button onClick={() => setKind('add_cash')}
+                        className={`flex-1 py-2 rounded text-sm ${kind === 'add_cash' ? 'bg-blue-600' : 'bg-gray-800 hover:bg-gray-700'}`}>
+                  💰 Cash (gasto)
+                </button>
+                <button onClick={() => setKind('add_income')}
+                        className={`flex-1 py-2 rounded text-sm ${kind === 'add_income' ? 'bg-emerald-600' : 'bg-gray-800 hover:bg-gray-700'}`}>
+                  📈 Ingreso
+                </button>
+              </div>
+
+              <label className="block">
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">Monto (COP)</span>
+                <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)}
+                  placeholder="25000"
+                  className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm" />
+              </label>
+
+              <label className="block">
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">Categoría</span>
+                <input type="text" list="add-path-suggestions" value={path}
+                  onChange={(e) => setPath(e.target.value)}
+                  placeholder={kind === 'add_income' ? 'Salario' : 'Alimentación / Café'}
+                  className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm" />
+                <datalist id="add-path-suggestions">
+                  {allPaths.map((p) => <option key={p} value={p} />)}
+                </datalist>
+              </label>
+
+              <label className="block">
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">Nota (opcional)</span>
+                <input type="text" value={note} onChange={(e) => setNote(e.target.value)}
+                  placeholder="café con amiga"
+                  className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm" />
+              </label>
+
+              <div className="text-[10px] text-gray-500">
+                Se agregará a tu nombre ({userIdentity}). Se procesa en próxima sync.
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-800 flex justify-end gap-2">
+              <button onClick={onClose} className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm">Cancelar</button>
+              <button onClick={submit} disabled={submitting || !amount || !path}
+                      className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-medium">
+                {submitting ? 'Enviando…' : 'Agregar'}
+              </button>
             </div>
           </div>
         </div>
@@ -818,45 +1095,98 @@
       );
     }
 
-    function SettingsPanel({ url, setUrl, token, setToken, onClose, onApply }) {
+    function SettingsPanel({
+      url, setUrl, token, setToken,
+      workerUrl, setWorkerUrl, workerSecret, setWorkerSecret,
+      userIdentity, setUserIdentity,
+      onClose, onApply,
+    }) {
       const [u, setU] = useState(url);
       const [t, setT] = useState(token);
+      const [wU, setWU] = useState(workerUrl);
+      const [wS, setWS] = useState(workerSecret);
+      const [uid, setUid] = useState(userIdentity);
       const [showToken, setShowToken] = useState(false);
-      const apply = () => { setUrl(u); setToken(t); onApply(); onClose(); };
+      const [showSecret, setShowSecret] = useState(false);
+      const apply = () => {
+        setUrl(u); setToken(t); setWorkerUrl(wU); setWorkerSecret(wS); setUserIdentity(uid);
+        onApply(); onClose();
+      };
       return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-          <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md max-h-[90vh] overflow-y-auto"
+               onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gray-900 px-5 py-3 border-b border-gray-800 flex items-center justify-between">
               <h3 className="font-semibold">Configuración</h3>
               <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4 text-sm">
-              <label className="block">
-                <span className="text-xs uppercase tracking-wide text-gray-400">URL del snapshot</span>
-                <input type="text" value={u} onChange={(e) => setU(e.target.value)}
-                  className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
-              </label>
-              <label className="block">
-                <span className="text-xs uppercase tracking-wide text-gray-400">Token (GitHub read-only)</span>
-                <div className="flex gap-2 mt-1">
-                  <input type={showToken ? 'text' : 'password'} value={t} onChange={(e) => setT(e.target.value)}
-                    placeholder="github_pat_..."
-                    className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
-                  <button onClick={() => setShowToken(!showToken)}
-                          className="px-2 bg-gray-800 border border-gray-700 rounded text-xs">
-                    {showToken ? '🙈' : '👁'}
-                  </button>
-                </div>
-                <span className="text-xs text-gray-500 block mt-1">
-                  Solo lectura; queda en localStorage del navegador.
-                </span>
-              </label>
-              <div className="text-xs text-gray-500 pt-2 border-t border-gray-800">
+              <div className="pb-2 border-b border-gray-800">
+                <h4 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Identidad</h4>
+                <label className="block">
+                  <span className="text-xs text-gray-400">¿Quién eres?</span>
+                  <select value={uid} onChange={(e) => setUid(e.target.value)}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
+                    <option value="santi">Santi</option>
+                    <option value="lau">Lau</option>
+                  </select>
+                  <span className="text-[10px] text-gray-500 block mt-1">
+                    Cada edición que envíes desde este navegador queda atribuida a ti.
+                  </span>
+                </label>
+              </div>
+
+              <div className="pb-2 border-b border-gray-800">
+                <h4 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Datos (lectura)</h4>
+                <label className="block">
+                  <span className="text-xs text-gray-400">URL del snapshot</span>
+                  <input type="text" value={u} onChange={(e) => setU(e.target.value)}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
+                </label>
+                <label className="block mt-2">
+                  <span className="text-xs text-gray-400">Token GitHub (read-only)</span>
+                  <div className="flex gap-2 mt-1">
+                    <input type={showToken ? 'text' : 'password'} value={t} onChange={(e) => setT(e.target.value)}
+                      placeholder="github_pat_..."
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
+                    <button onClick={() => setShowToken(!showToken)}
+                            className="px-2 bg-gray-800 border border-gray-700 rounded text-xs">
+                      {showToken ? '🙈' : '👁'}
+                    </button>
+                  </div>
+                </label>
+              </div>
+
+              <div className="pb-2">
+                <h4 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Edición (escritura)</h4>
+                <label className="block">
+                  <span className="text-xs text-gray-400">URL del Worker (Kikito)</span>
+                  <input type="text" value={wU} onChange={(e) => setWU(e.target.value)}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
+                </label>
+                <label className="block mt-2">
+                  <span className="text-xs text-gray-400">Secret del Worker (DASHBOARD_SECRET)</span>
+                  <div className="flex gap-2 mt-1">
+                    <input type={showSecret ? 'text' : 'password'} value={wS} onChange={(e) => setWS(e.target.value)}
+                      placeholder="el mismo que está en Cloudflare"
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs font-mono"/>
+                    <button onClick={() => setShowSecret(!showSecret)}
+                            className="px-2 bg-gray-800 border border-gray-700 rounded text-xs">
+                      {showSecret ? '🙈' : '👁'}
+                    </button>
+                  </div>
+                  <span className="text-[10px] text-gray-500 block mt-1">
+                    Sin esto, los botones de Editar / Agregar no funcionarán.
+                  </span>
+                </label>
+              </div>
+
+              <div className="text-[10px] text-gray-500 pt-2 border-t border-gray-800">
                 <p>Auto-refresh: cada {AUTO_REFRESH_MIN} minutos.</p>
-                <p className="mt-1">Actualizar datos en el Mac: <code className="px-1 py-0.5 bg-gray-800 rounded">./push_snapshot.sh</code></p>
+                <p className="mt-1">Refrescar datos en Mac: <code className="px-1 py-0.5 bg-gray-800 rounded">python3 v3/sync.py</code></p>
               </div>
             </div>
-            <div className="px-5 py-4 border-t border-gray-800 flex justify-end gap-2">
+            <div className="sticky bottom-0 bg-gray-900 px-5 py-3 border-t border-gray-800 flex justify-end gap-2">
               <button onClick={onClose} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm">Cancelar</button>
               <button onClick={apply} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm">Aplicar y recargar</button>
             </div>
