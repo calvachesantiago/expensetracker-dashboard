@@ -385,6 +385,34 @@
       );
     }
 
+    function ChoiceSelect({ value, onChange, options, placeholder }) {
+      const [open, setOpen] = useState(false);
+      const selected = options.find(o => o.value === (value || ''));
+      const displayLabel = selected ? selected.label : (placeholder || '—');
+      return (
+        <div className="relative">
+          <button type="button"
+            onClick={() => setOpen(o => !o)}
+            onBlur={() => setTimeout(() => setOpen(false), 200)}
+            className="w-full text-left bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500 flex items-center justify-between">
+            <span className={selected && selected.value ? 'text-gray-200' : 'text-gray-500'}>{displayLabel}</span>
+            <span className="text-gray-500 ml-2">▾</span>
+          </button>
+          {open && (
+            <ul className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-700 rounded shadow-lg max-h-56 overflow-y-auto">
+              {options.map(opt => (
+                <li key={opt.value}
+                    onMouseDown={(e) => { e.preventDefault(); onChange(opt.value); setOpen(false); }}
+                    className="px-3 py-1.5 text-xs text-gray-200 hover:bg-blue-700 hover:text-white cursor-pointer border-b border-gray-700 last:border-b-0">
+                  {opt.label}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+    }
+
     function Toast({ toast, onDismiss }) {
       useEffect(() => {
         const t = setTimeout(onDismiss, 4000);
@@ -970,13 +998,13 @@
                   </label>
 
                   <label className="block">
-                    <span className="text-[11px] uppercase tracking-wide text-gray-400">Atribución</span>
-                    <select value={addedBy} onChange={(e) => setAddedBy(e.target.value)}
-                      className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs">
-                      <option value="">— (compartido / sin etiqueta)</option>
-                      <option value="santi">Santi</option>
-                      <option value="lau">Lau</option>
-                    </select>
+                    <span className="text-[11px] uppercase tracking-wide text-gray-400 block mb-1">Atribución</span>
+                    <ChoiceSelect value={addedBy} onChange={setAddedBy}
+                      options={[
+                        { value: '',      label: '— (compartido / sin etiqueta)' },
+                        { value: 'santi', label: 'Santi' },
+                        { value: 'lau',   label: 'Lau' },
+                      ]} />
                   </label>
 
                   <label className="block">
