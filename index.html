@@ -354,6 +354,37 @@
       );
     }
 
+    function PathInput({ value, onChange, options, placeholder }) {
+      const [open, setOpen] = useState(false);
+      const v = value || '';
+      const filtered = useMemo(() => {
+        const q = v.toLowerCase();
+        if (!q) return options.slice(0, 10);
+        return options.filter(o => o.toLowerCase().includes(q)).slice(0, 10);
+      }, [v, options]);
+      return (
+        <div className="relative">
+          <input type="text" value={v}
+            onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setTimeout(() => setOpen(false), 200)}
+            placeholder={placeholder}
+            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500" />
+          {open && filtered.length > 0 && (
+            <ul className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-700 rounded shadow-lg max-h-56 overflow-y-auto">
+              {filtered.map(opt => (
+                <li key={opt}
+                    onMouseDown={(e) => { e.preventDefault(); onChange(opt); setOpen(false); }}
+                    className="px-3 py-1.5 text-xs text-gray-200 hover:bg-blue-700 hover:text-white cursor-pointer border-b border-gray-700 last:border-b-0">
+                  {opt}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+    }
+
     function Toast({ toast, onDismiss }) {
       useEffect(() => {
         const t = setTimeout(onDismiss, 4000);
@@ -926,13 +957,9 @@
               {editing && (
                 <div className="mt-4 pt-4 border-t border-gray-800 space-y-3">
                   <label className="block">
-                    <span className="text-[11px] uppercase tracking-wide text-gray-400">Categoría</span>
-                    <input type="text" list="path-suggestions" value={path}
-                      onChange={(e) => setPath(e.target.value)}
-                      className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs" />
-                    <datalist id="path-suggestions">
-                      {allPaths.map((p) => <option key={p} value={p} />)}
-                    </datalist>
+                    <span className="text-[11px] uppercase tracking-wide text-gray-400 block mb-1">Categoría</span>
+                    <PathInput value={path} onChange={setPath} options={allPaths}
+                               placeholder="Alimentación / Restaurantes" />
                   </label>
 
                   <label className="block">
@@ -1053,14 +1080,9 @@
               </label>
 
               <label className="block">
-                <span className="text-[11px] uppercase tracking-wide text-gray-400">Categoría</span>
-                <input type="text" list="add-path-suggestions" value={path}
-                  onChange={(e) => setPath(e.target.value)}
-                  placeholder={kind === 'add_income' ? 'Salario' : 'Alimentación / Café'}
-                  className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm" />
-                <datalist id="add-path-suggestions">
-                  {allPaths.map((p) => <option key={p} value={p} />)}
-                </datalist>
+                <span className="text-[11px] uppercase tracking-wide text-gray-400 block mb-1">Categoría</span>
+                <PathInput value={path} onChange={setPath} options={allPaths}
+                           placeholder={kind === 'add_income' ? 'Salario' : 'Alimentación / Café'} />
               </label>
 
               <label className="block">
