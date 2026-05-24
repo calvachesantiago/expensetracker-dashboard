@@ -147,11 +147,9 @@
       const uncat = (data.monthly_by_parent[''] || {})[month] || 0;
       if (uncat > 0) spendTotal += uncat;
 
-      budgetRows.sort((a, b) => {
-        const ap = a.budget > 0 ? a.spend / a.budget : 9999;
-        const bp = b.budget > 0 ? b.spend / b.budget : 9999;
-        return bp - ap;
-      });
+      // Sort by budget size (largest first). Ties broken by spend (largest first)
+      // so categories without a budget but with real spend still sink, not float.
+      budgetRows.sort((a, b) => (b.budget - a.budget) || (b.spend - a.spend));
       const income = data.transactions
         .filter((t) => t.ym === month && INCOME_CATS.has(t.parent))
         .reduce((s, t) => s + t.amount, 0);
@@ -742,17 +740,23 @@
     function TxRow({ tx, onClick }) {
       const isUncat = !tx.category_id;
       const isIncome = INCOME_CATS.has(tx.parent);
+      const notMine  = tx.is_split && tx.split_owed >= tx.amount;
+      const partial  = tx.is_split && tx.split_owed > 0 && tx.split_owed < tx.amount;
       return (
         <button onClick={onClick}
           className="w-full text-left px-3 py-2 hover:bg-gray-800/50 transition-colors flex items-center gap-2">
           <div className="flex-shrink-0 text-[10px] text-gray-500 w-16">{tx.date}</div>
           <div className="flex-1 min-w-0">
-            <div className="text-xs truncate">{tx.merchant}</div>
+            <div className="text-xs truncate flex items-center gap-1.5">
+              <span className={notMine ? 'line-through text-gray-500' : ''}>{tx.merchant}</span>
+              {notMine && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/50 border border-amber-800 text-amber-300 flex-shrink-0">🚫 No fue mío</span>}
+              {partial && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/40 border border-amber-800 text-amber-300 flex-shrink-0">➗ Split</span>}
+            </div>
             <div className="text-[10px] text-gray-500 truncate">
               {isUncat ? <span className="text-amber-500">⚠ sin categoría</span> : <span>{tx.label}</span>}
             </div>
           </div>
-          <div className={`text-xs font-medium ${isIncome ? 'text-emerald-400' : ''}`}>
+          <div className={`text-xs font-medium ${isIncome ? 'text-emerald-400' : ''} ${notMine ? 'text-gray-500 line-through' : ''}`}>
             {isIncome ? '+' : ''}{fmtCOPfull(tx.amount)}
           </div>
           <ChevronRight size={12} className="text-gray-600 flex-shrink-0" />
@@ -972,7 +976,14 @@
 
             <div className="p-4 space-y-3 text-sm">
               <DetailRow label="Comercio" value={tx.merchant} />
-              {!editing && <DetailRow label="Monto" value={fmtCOPfull(tx.amount)} />}
+              {!editing && <DetailRow label="Monto"
+                value={
+                  tx.is_split && tx.split_owed >= tx.amount
+                    ? <span><span className="line-through text-gray-500">{fmtCOPfull(tx.amount)}</span> <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-900/50 border border-amber-800 text-amber-300">🚫 No fue mío</span></span>
+                    : tx.is_split && tx.split_owed > 0
+                      ? <span>{fmtCOPfull(tx.amount)} <span className="ml-2 text-[10px] text-amber-300">(mi parte: {fmtCOPfull(tx.amount - tx.split_owed)})</span></span>
+                      : fmtCOPfull(tx.amount)
+                } />}
               <DetailRow label="Fecha" value={tx.date + (tx.time ? ` ${tx.time}` : '')} />
               {!editing && <DetailRow label="Categoría"
                 value={tx.category_id ? tx.label : <span className="text-amber-400">Sin categoría</span>} />}
