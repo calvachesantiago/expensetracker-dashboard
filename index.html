@@ -69,12 +69,29 @@
     };
     const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
 
+    // Pace-aware bar color for KPI cards ("am I ahead of the month?")
     const budgetColor = (spendPct, daysPct) => {
       if (spendPct >= 100) return 'bg-red-500';
       const over = spendPct - daysPct;
       if (over > 30) return 'bg-red-500';
       if (over > 10) return 'bg-amber-500';
       return 'bg-emerald-500';
+    };
+
+    // %-only bar color for the per-category Budget vs Actual table.
+    // Traffic-light progression: green → yellow → orange → red.
+    const categoryBudgetColor = (spendPct) => {
+      if (spendPct >= 100) return 'bg-red-500';
+      if (spendPct >= 85)  return 'bg-orange-500';
+      if (spendPct >= 70)  return 'bg-yellow-500';
+      return 'bg-emerald-500';
+    };
+    // Matching text colors so the "%" label always agrees with the bar
+    const categoryBudgetTextColor = (spendPct) => {
+      if (spendPct >= 100) return 'text-red-400';
+      if (spendPct >= 85)  return 'text-orange-400';
+      if (spendPct >= 70)  return 'text-yellow-400';
+      return 'text-emerald-400';
     };
 
     // ────────────────────────────────────────────────────────────────────────
@@ -627,7 +644,7 @@
           <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
             {rows.map((r) => {
               const p = r.budget > 0 ? pct(r.spend, r.budget) : null;
-              const color = r.budget > 0 ? budgetColor(p, 50) : 'bg-gray-700';
+              const color = r.budget > 0 ? categoryBudgetColor(p) : 'bg-gray-700';
               const isOpen = expanded.has(r.name);
               const subs = isOpen ? subsForParent(r.name) : [];
               return (
@@ -645,7 +662,7 @@
                       <span className="text-gray-400 text-[11px]">
                         {fmtCOPfull(r.spend)} {r.budget > 0 && <span className="text-gray-600">/ {fmtCOPfull(r.budget)}</span>}
                         {p !== null && (
-                          <span className={`ml-2 font-medium ${p >= 100 ? 'text-red-400' : p >= 80 ? 'text-amber-400' : 'text-emerald-400'}`}>{p}%</span>
+                          <span className={`ml-2 font-medium ${categoryBudgetTextColor(p)}`}>{p}%</span>
                         )}
                       </span>
                     </div>
