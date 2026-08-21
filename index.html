@@ -167,8 +167,10 @@
       // Sort by budget size (largest first). Ties broken by spend (largest first)
       // so categories without a budget but with real spend still sink, not float.
       budgetRows.sort((a, b) => (b.budget - a.budget) || (b.spend - a.spend));
-      const income = data.transactions
-        .filter((t) => t.ym === month && INCOME_CATS.has(t.parent))
+      // Income lives in its own snapshot key — `transactions` is expenses-only
+      // (merging them would make every spend aggregate count salary as spend).
+      const income = (data.income_transactions || [])
+        .filter((t) => t.ym === month)
         .reduce((s, t) => s + t.amount, 0);
 
       const [y, m] = month.split('-').map(Number);
@@ -355,6 +357,7 @@
             {tab === 'home' && <HomeView data={data} month={month} onSelectTx={setSelectedTx} />}
             {tab === 'trends' && <TrendsView data={data} month={month} />}
             {tab === 'budgets' && <BudgetsView data={data} />}
+            {tab === 'salary' && <SalaryView data={data} />}
             {tab === 'all' && <AllTxsView data={data} onSelectTx={setSelectedTx} />}
           </main>
           {selectedTx && (
@@ -503,6 +506,7 @@
         { id: 'home', label: 'Inicio' },
         { id: 'trends', label: 'Tendencias' },
         { id: 'budgets', label: 'Presupuestos' },
+        { id: 'salary', label: 'Salario' },
         { id: 'all', label: 'Todas las transacciones' },
       ];
       return (
@@ -896,6 +900,144 @@
                            formatter={(v) => fmtCOPfull(v)} />
                 </PieChart>
               </ResponsiveContainer>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    function SalaryView({ data }) {
+      const slips = (data.payslips || []).slice().sort((a, b) => b.ym.localeCompare(a.ym));
+      const people = [...new Set(slips.map((s) => s.person))];
+      // Hooks must run before any early return, or the hook order changes
+      // between renders once payslips start arriving.
+      const [person, setPerson] = useState('');
+      const active = person && people.includes(person) ? person : (people[0] || '');
+      if (!slips.length) {
+        return (
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-sm text-gray-400">
+            Aún no hay nóminas registradas. Reenvía tus recibos de pago por correo
+            y aparecerán aquí tras la próxima sync.
+          </div>
+        );
+      }
+      const mine = slips.filter((s) => s.person === active);
+      const latest = mine[0];
+
+      // Totals for the calendar year of the most recent payslip
+      const year = latest.ym.slice(0, 4);
+      const ytd = mine.filter((s) => s.ym.startsWith(year));
+      const sum = (k) => ytd.reduce((a, s) => a + (s[k] || 0), 0);
+      const ytdNet = sum('net'), ytdGross = sum('gross'), ytdTax = sum('tax');
+      const effRate = ytdGross ? (ytdTax / ytdGross * 100) : 0;
+
+      const chart = mine.slice().reverse().map((s) => ({
+        month: s.ym, Neto: s.net, Retención: s.tax,
+      }));
+
+      return (
+        <div className="space-y-6">
+          {people.length > 1 && (
+            <div className="flex gap-2">
+              {people.map((p) => (
+                <button key={p} onClick={() => setPerson(p)}
+                  className={`px-3 py-1 rounded text-xs capitalize ${
+                    p === active ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300'}`}>
+                  {p}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* The three headline figures — latest payslip */}
+          <section>
+            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">
+              Último recibo — {latest.period}
+              {latest.extraordinary && <span className="ml-2 text-amber-400">· mes extraordinario</span>}
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="bg-gray-900 border border-blue-800/60 rounded-xl p-4">
+                <div className="text-[10px] uppercase tracking-wide text-gray-400">Neto pagado</div>
+                <div className="text-2xl font-semibold text-blue-300 mt-1">{fmtCOPfull(latest.net)}</div>
+              </div>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <div className="text-[10px] uppercase tracking-wide text-gray-400">Salario bruto</div>
+                <div className="text-2xl font-semibold mt-1">{fmtCOPfull(latest.gross)}</div>
+              </div>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <div className="text-[10px] uppercase tracking-wide text-gray-400">Retención en la fuente</div>
+                <div className="text-2xl font-semibold text-amber-300 mt-1">{fmtCOPfull(latest.tax)}</div>
+                {latest.retention_pct != null && (
+                  <div className="text-[10px] text-gray-500 mt-0.5">{latest.retention_pct}% aplicado</div>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">
+              Acumulado {year} ({ytd.length} {ytd.length === 1 ? 'mes' : 'meses'})
+            </h2>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+              <div><div className="text-[10px] text-gray-400 uppercase">Neto</div>
+                   <div className="font-medium text-blue-300">{fmtCOPfull(ytdNet)}</div></div>
+              <div><div className="text-[10px] text-gray-400 uppercase">Bruto</div>
+                   <div className="font-medium">{fmtCOPfull(ytdGross)}</div></div>
+              <div><div className="text-[10px] text-gray-400 uppercase">Impuestos</div>
+                   <div className="font-medium text-amber-300">{fmtCOPfull(ytdTax)}</div></div>
+              <div><div className="text-[10px] text-gray-400 uppercase">Tasa efectiva</div>
+                   <div className="font-medium">{effRate.toFixed(1)}%</div></div>
+            </div>
+          </section>
+
+          <section>
+            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Neto vs retención por mes</h2>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={chart}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                  <XAxis dataKey="month" stroke="#6b7280" fontSize={11} />
+                  <YAxis stroke="#6b7280" fontSize={11} width={54} tickFormatter={(v) => fmtCOP(v)} />
+                  <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
+                           formatter={(v) => fmtCOPfull(v)} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Bar dataKey="Neto" stackId="a" fill="#60a5fa" isAnimationActive={false} />
+                  <Bar dataKey="Retención" stackId="a" fill="#f59e0b" isAnimationActive={false} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+
+          <section>
+            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Detalle por período</h2>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-800/60 text-gray-400">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Período</th>
+                    <th className="px-3 py-2 text-right">Bruto</th>
+                    <th className="px-3 py-2 text-right">Retención</th>
+                    <th className="px-3 py-2 text-right">Salud+Pensión</th>
+                    <th className="px-3 py-2 text-right">Ahorro vol.</th>
+                    <th className="px-3 py-2 text-right">Neto</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mine.map((s) => (
+                    <tr key={s.person + s.period} className="border-t border-gray-800">
+                      <td className="px-3 py-2">
+                        {s.period}
+                        {s.extraordinary && <span className="ml-1 text-[9px] text-amber-400">extra</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right">{fmtCOPfull(s.gross)}</td>
+                      <td className="px-3 py-2 text-right text-amber-300">{fmtCOPfull(s.tax)}</td>
+                      <td className="px-3 py-2 text-right text-gray-400">{fmtCOPfull(s.health + s.pension)}</td>
+                      <td className="px-3 py-2 text-right text-gray-400">{fmtCOPfull(s.savings)}</td>
+                      <td className="px-3 py-2 text-right font-medium text-blue-300">{fmtCOPfull(s.net)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </section>
         </div>
