@@ -179,8 +179,14 @@
       const isCurrent = today.getFullYear() === y && today.getMonth() + 1 === m;
       const dayOfMonth = isCurrent ? today.getDate() : daysInMonth;
       const daysPct = Math.round((dayOfMonth / daysInMonth) * 100);
+      // Only variable spend gets extrapolated. Fixed costs (arriendo, empleada,
+      // servicios — whether already imported from Nu or still estimated) are
+      // paid once a month, so treating them as a daily run-rate would badly
+      // overstate the projection.
+      const fixed = (data.monthly_fixed || {})[month] || 0;
+      const variable = Math.max(0, spendTotal - fixed);
       const projected = isCurrent && dayOfMonth > 0
-        ? Math.round((spendTotal / dayOfMonth) * daysInMonth) : spendTotal;
+        ? Math.round(fixed + (variable / dayOfMonth) * daysInMonth) : spendTotal;
 
       return { month, spendTotal, budgetTotal, income, net: income - spendTotal,
                daysInMonth, dayOfMonth, daysPct, projected, budgetRows };
@@ -776,6 +782,7 @@
       const isIncome = INCOME_CATS.has(tx.parent);
       const notMine  = tx.is_split && tx.split_owed >= tx.amount;
       const partial  = tx.is_split && tx.split_owed > 0 && tx.split_owed < tx.amount;
+      const estimated = tx.source === 'Estimado';
       return (
         <button onClick={onClick}
           className="w-full text-left px-3 py-2 hover:bg-gray-800/50 transition-colors flex items-center gap-2">
@@ -785,6 +792,7 @@
               <span className={notMine ? 'line-through text-gray-500' : ''}>{tx.merchant}</span>
               {notMine && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/50 border border-amber-800 text-amber-300 flex-shrink-0">🚫 No fue mío</span>}
               {partial && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/40 border border-amber-800 text-amber-300 flex-shrink-0">➗ Split</span>}
+              {estimated && <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-900/40 border border-sky-800 text-sky-300 flex-shrink-0">~ estimado</span>}
             </div>
             <div className="text-[10px] text-gray-500 truncate">
               {isUncat ? <span className="text-amber-500">⚠ sin categoría</span> : <span>{tx.label}</span>}
