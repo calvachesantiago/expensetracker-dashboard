@@ -32,7 +32,7 @@
     import {
       BarChart, Bar, ResponsiveContainer, CartesianGrid, XAxis, YAxis,
       Tooltip, Legend, Cell, LineChart, Line, ReferenceLine,
-      ComposedChart, LabelList,
+      LabelList,
     } from 'recharts';
     import {
       Calendar, RefreshCw, Settings, AlertTriangle, ChevronRight, X,
@@ -553,7 +553,6 @@
           {attention.categorization.length > 0 && <NeedsAttention items={attention.categorization} />}
           {attention.overBudget.length > 0 && <OverBudgetMini items={attention.overBudget} month={month} />}
           <BudgetTable rows={stats.budgetRows} data={data} month={month} />
-          <TrendsChart data={data} months={lastNMonths(data.months, 6, month)} />
           <RecentActivity data={data} onSelectTx={onSelectTx} />
         </div>
       );
@@ -740,35 +739,6 @@
       );
     }
 
-    function TrendsChart({ data, months }) {
-      const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
-      const chartData = months.map((m) => {
-        const row = { month: m };
-        parents.forEach((p) => { row[p.name] = (data.monthly_by_parent[p.name] || {})[m] || 0; });
-        return row;
-      });
-      return (
-        <section>
-          <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Tendencia — últimos 6 meses</h2>
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="month" stroke="#6b7280" fontSize={11} />
-                <YAxis stroke="#6b7280" fontSize={11} tickFormatter={(v) => fmtCOP(v)} />
-                <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
-                         formatter={(v) => fmtCOPfull(v)} />
-                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
-                {parents.map((p, i) => (
-                  <Bar key={p.name} dataKey={p.name} stackId="a" fill={PARENT_COLORS[i % PARENT_COLORS.length]} />
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-      );
-    }
-
     function RecentActivity({ data, onSelectTx }) {
       const [expanded, setExpanded] = useState(false);
       const visible = expanded ? 25 : 8;
@@ -829,62 +799,95 @@
     function TrendsView({ data, month }) {
       const months12 = lastNMonths(data.months, 12, month);
       const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
-      const chartData = months12.map((m) => {
-        const row = { month: m };
-        parents.forEach((p) => { row[p.name] = (data.monthly_by_parent[p.name] || {})[m] || 0; });
-        return row;
-      });
 
-      // Total spend per month. Same definition as the KPI card (all expense
-      // parents + uncategorized) so the line always agrees with "Este mes".
-      const totalsData = months12.map((m) => {
-        let total = (data.monthly_by_parent[''] || {})[m] || 0;
-        parents.forEach((p) => { total += (data.monthly_by_parent[p.name] || {})[m] || 0; });
-        return { month: m, total };
-      });
-      // The month in progress is only partially spent — it would read as a
-      // crash at the end of the line, so we mark its point and leave it out
-      // of the average.
-      const nowYm = new Date().toISOString().slice(0, 7);
-      const hasPartial = totalsData.some((d) => d.month === nowYm);
-      const complete = totalsData.filter((d) => d.month !== nowYm);
-      const avgTotal = complete.length
-        ? Math.round(complete.reduce((s, d) => s + d.total, 0) / complete.length) : 0;
-      // Short ticks ("ago", "ene 26") so all 12 months fit without Recharts
-      // dropping labels at irregular intervals.
       const MONTH_ABBR = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
       const fmtMonthTick = (ym) => {
         const [y, mm] = String(ym).split('-');
         const label = MONTH_ABBR[parseInt(mm, 10) - 1] || ym;
         return mm === '01' ? `${label} ${y.slice(2)}` : label;
       };
+      const spendOf = (m) => {
+        let t = (data.monthly_by_parent[''] || {})[m] || 0;
+        parents.forEach((p) => { t += (data.monthly_by_parent[p.name] || {})[m] || 0; });
+        return t;
+      };
+
+      // ── 1. Total spend per month ────────────────────────────────────────
+      // Same definition as the KPI card so the line always agrees with "Este mes".
+      const totalsData = months12.map((m) => ({ month: m, total: spendOf(m) }));
+      const nowYm = new Date().toISOString().slice(0, 7);
+      const hasPartial = totalsData.some((d) => d.month === nowYm);
+      const complete = totalsData.filter((d) => d.month !== nowYm);
+      const avgTotal = complete.length
+        ? Math.round(complete.reduce((s, d) => s + d.total, 0) / complete.length) : 0;
       const TotalDot = ({ cx, cy, payload }) => (
         <circle cx={cx} cy={cy} r={4} strokeWidth={2}
                 fill={payload.month === nowYm ? '#111827' : '#60a5fa'}
                 stroke={payload.month === nowYm ? '#f59e0b' : '#60a5fa'} />
       );
-      const pieData = parents
-        .map((p) => ({ name: p.name, value: (data.monthly_by_parent[p.name] || {})[month] || 0 }))
-        .filter((d) => d.value > 0)
-        .sort((a, b) => b.value - a.value);
 
-      // Cash flow per month: income (payslips) vs expenses. Balance is left
-      // null where no payslip exists, so the line breaks instead of drawing a
-      // fake multi-million deficit.
-      const incomeByMonth = {};
-      (data.income_transactions || []).forEach((t) => {
-        incomeByMonth[t.ym] = (incomeByMonth[t.ym] || 0) + t.amount;
+      // ── 2 & 3. Top-N categories + "Otros" ───────────────────────────────
+      // 13 stacked series is unreadable and only the bottom one has a common
+      // baseline. Seven named + Otros keeps ~85% of spend explicit while
+      // staying inside what anyone can actually distinguish.
+      const TOP_N = 7;
+      const ranked = parents
+        .map((p) => [p.name, months12.reduce((s, m) => s + ((data.monthly_by_parent[p.name] || {})[m] || 0), 0)])
+        .sort((a, b) => b[1] - a[1]);
+      const TOP = ranked.slice(0, TOP_N).map((r) => r[0]);
+      const SERIES = [...TOP, 'Otros'];
+      const seriesColor = (name, i) => (name === 'Otros' ? '#4b5563' : PARENT_COLORS[i % PARENT_COLORS.length]);
+
+      const stacked = months12.map((m) => {
+        const row = { month: m };
+        let otros = (data.monthly_by_parent[''] || {})[m] || 0;
+        parents.forEach((p) => {
+          const v = (data.monthly_by_parent[p.name] || {})[m] || 0;
+          if (TOP.includes(p.name)) row[p.name] = v; else otros += v;
+        });
+        row['Otros'] = otros;
+        return row;
       });
-      const balanceData = months12.map((m) => {
-        let gastos = (data.monthly_by_parent[''] || {})[m] || 0;
-        parents.forEach((p) => { gastos += (data.monthly_by_parent[p.name] || {})[m] || 0; });
-        const ingresos = incomeByMonth[m] || 0;
+      // Same series, expressed as share — answers "where is it going" rather
+      // than "how much", and stays comparable when totals move.
+      const share = stacked.map((row) => {
+        const tot = SERIES.reduce((s, k) => s + (row[k] || 0), 0);
+        const out = { month: row.month };
+        SERIES.forEach((k) => { out[k] = tot ? +(((row[k] || 0) / tot) * 100).toFixed(1) : 0; });
+        return out;
+      });
+
+      // ── 4. Monthly balance ──────────────────────────────────────────────
+      // Only base salary — the Jan/Feb bonuses are 4x a normal month and would
+      // flatten everything else. Starts at the first month with income so the
+      // pre-payslip months don't render as empty space.
+      const baseByMonth = {};
+      (data.income_transactions || []).forEach((t) => {
+        if (t.parent !== 'Ingresos extras') baseByMonth[t.ym] = (baseByMonth[t.ym] || 0) + t.amount;
+      });
+      const firstIncome = months12.find((m) => (baseByMonth[m] || 0) > 0);
+      const balanceData = (firstIncome ? months12.filter((m) => m >= firstIncome) : []).map((m) => {
+        const ingresos = baseByMonth[m] || 0;
+        const gastos = spendOf(m);
+        return { month: m, ingresos, gastos, Balance: ingresos > 0 ? ingresos - gastos : null };
+      });
+      const acumulado = balanceData.reduce((s, b) => s + (b.Balance || 0), 0);
+
+      // ── 5. Spend against income, split fixed vs variable ────────────────
+      // Bars are a share of INCOME (not of spending), so the headroom above
+      // each bar is what's left over — no separate "disponible" band needed.
+      const vsIncome = balanceData.filter((b) => b.ingresos > 0).map((b) => {
+        const fijos = (data.monthly_fixed || {})[b.month] || 0;
         return {
-          month: m, Ingresos: ingresos, Gastos: gastos,
-          Balance: ingresos > 0 ? ingresos - gastos : null,
+          month: b.month, ingreso: b.ingresos,
+          fijosCop: fijos, varCop: Math.max(0, b.gastos - fijos),
+          'Fijos': +((fijos / b.ingresos) * 100).toFixed(1),
+          'Variables': +((Math.max(0, b.gastos - fijos) / b.ingresos) * 100).toFixed(1),
         };
       });
-      const balanceGaps = balanceData.filter((d) => d.Balance === null).length;
+
+      const tipStyle = { backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' };
+
       return (
         <div className="space-y-6">
           <section>
@@ -902,99 +905,124 @@
                   <XAxis dataKey="month" stroke="#6b7280" fontSize={11} tickMargin={6}
                          interval={0} tickFormatter={fmtMonthTick} />
                   <YAxis stroke="#6b7280" fontSize={11} width={54} tickFormatter={(v) => fmtCOP(v)} />
-                  <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
-                           cursor={{ stroke: '#374151', strokeWidth: 1 }}
+                  <Tooltip contentStyle={tipStyle} cursor={{ stroke: '#374151', strokeWidth: 1 }}
                            formatter={(v) => [fmtCOPfull(v), 'Gasto total']} />
-                  {avgTotal > 0 && (
-                    <ReferenceLine y={avgTotal} stroke="#4b5563" strokeDasharray="4 4" />
-                  )}
+                  {avgTotal > 0 && <ReferenceLine y={avgTotal} stroke="#4b5563" strokeDasharray="4 4" />}
                   <Line type="monotone" dataKey="total" name="Gasto total"
-                        stroke="#60a5fa" strokeWidth={2}
-                        dot={<TotalDot />} activeDot={{ r: 6, fill: '#60a5fa', stroke: '#111827', strokeWidth: 2 }} />
+                        stroke="#60a5fa" strokeWidth={2} dot={<TotalDot />}
+                        activeDot={{ r: 6, fill: '#60a5fa', stroke: '#111827', strokeWidth: 2 }} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
           </section>
+
           <section>
-            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">12 meses — apilado por categoría</h2>
+            <div className="flex items-baseline justify-between mb-2">
+              <h2 className="text-[11px] uppercase tracking-wide text-gray-400">Gasto por categoría</h2>
+              <span className="text-[10px] text-gray-500">top {TOP_N} + Otros</span>
+            </div>
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-              <ResponsiveContainer width="100%" height={360}>
-                <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                  <XAxis dataKey="month" stroke="#6b7280" fontSize={11} />
-                  <YAxis stroke="#6b7280" fontSize={11} tickFormatter={(v) => fmtCOP(v)} />
-                  <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
-                           formatter={(v) => fmtCOPfull(v)} />
+              <ResponsiveContainer width="100%" height={340}>
+                <BarChart data={stacked}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                  <XAxis dataKey="month" stroke="#6b7280" fontSize={11} interval={0} tickFormatter={fmtMonthTick} />
+                  <YAxis stroke="#6b7280" fontSize={11} width={54} tickFormatter={(v) => fmtCOP(v)} />
+                  <Tooltip contentStyle={tipStyle} formatter={(v) => fmtCOPfull(v)} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
-                  {parents.map((p, i) => (
-                    <Bar key={p.name} dataKey={p.name} stackId="a" fill={PARENT_COLORS[i % PARENT_COLORS.length]} />
+                  {SERIES.map((k, i) => (
+                    <Bar key={k} dataKey={k} stackId="a" fill={seriesColor(k, i)} isAnimationActive={false} />
                   ))}
                 </BarChart>
               </ResponsiveContainer>
             </div>
           </section>
+
           <section>
-            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Distribución en {month}</h2>
-            {/* A sorted horizontal bar beats a pie here: 12 categories means 12
-                thin slices with leader lines nobody can read, and angles are
-                hard to compare. Bars sort by size, label in place, and make the
-                magnitudes directly comparable. */}
+            <div className="flex items-baseline justify-between mb-2">
+              <h2 className="text-[11px] uppercase tracking-wide text-gray-400">¿A dónde va la plata?</h2>
+              <span className="text-[10px] text-gray-500">participación % · cada mes suma 100%</span>
+            </div>
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-              <ResponsiveContainer width="100%" height={Math.max(200, pieData.length * 30)}>
-                <BarChart data={pieData} layout="vertical"
-                          margin={{ top: 4, right: 96, bottom: 4, left: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" horizontal={false} />
-                  <XAxis type="number" stroke="#6b7280" fontSize={11}
-                         tickFormatter={(v) => fmtCOP(v)} />
-                  <YAxis type="category" dataKey="name" stroke="#9ca3af" fontSize={11}
-                         width={150} tickLine={false} />
-                  <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
-                           cursor={{ fill: '#1f2937', fillOpacity: 0.4 }}
-                           formatter={(v) => [fmtCOPfull(v), 'Gasto']} />
-                  <Bar dataKey="value" radius={[0, 4, 4, 0]} isAnimationActive={false}>
-                    {pieData.map((_, i) => (
-                      <Cell key={i} fill={PARENT_COLORS[i % PARENT_COLORS.length]} />
-                    ))}
-                    <LabelList dataKey="value" position="right" fontSize={11} fill="#9ca3af"
-                               formatter={(v) => fmtCOPfull(v)} />
-                  </Bar>
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart data={share} stackOffset="expand">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                  <XAxis dataKey="month" stroke="#6b7280" fontSize={11} interval={0} tickFormatter={fmtMonthTick} />
+                  <YAxis stroke="#6b7280" fontSize={11} width={44} tickFormatter={(v) => Math.round(v * 100) + '%'} />
+                  <Tooltip contentStyle={tipStyle} formatter={(v) => v.toFixed(1) + '%'} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  {SERIES.map((k, i) => (
+                    <Bar key={k} dataKey={k} stackId="p" fill={seriesColor(k, i)} isAnimationActive={false} />
+                  ))}
                 </BarChart>
               </ResponsiveContainer>
             </div>
           </section>
 
-          {/* End-of-period cash flow. Only plotted where income actually
-              exists — months without a payslip would otherwise show a large
-              fake deficit. */}
-          <section>
-            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">
-              Balance de cierre — ingresos vs gastos
-            </h2>
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-              <ResponsiveContainer width="100%" height={300}>
-                <ComposedChart data={balanceData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
-                  <XAxis dataKey="month" stroke="#6b7280" fontSize={11} />
-                  <YAxis stroke="#6b7280" fontSize={11} width={56} tickFormatter={(v) => fmtCOP(v)} />
-                  <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
-                           formatter={(v) => fmtCOPfull(v)} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <ReferenceLine y={0} stroke="#4b5563" />
-                  <Bar dataKey="Ingresos" fill="#10b981" isAnimationActive={false} />
-                  <Bar dataKey="Gastos"   fill="#f43f5e" isAnimationActive={false} />
-                  <Line type="monotone" dataKey="Balance" stroke="#60a5fa" strokeWidth={2}
-                        connectNulls={false} isAnimationActive={false}
-                        dot={{ r: 4, fill: '#60a5fa' }} />
-                </ComposedChart>
-              </ResponsiveContainer>
-              {balanceGaps > 0 && (
+          {balanceData.length > 0 && (
+            <section>
+              <div className="flex items-baseline justify-between mb-2">
+                <h2 className="text-[11px] uppercase tracking-wide text-gray-400">Balance mensual</h2>
+                <span className="text-[10px] text-gray-500">acumulado {fmtCOPfull(acumulado)}</span>
+              </div>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={balanceData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                    <XAxis dataKey="month" stroke="#6b7280" fontSize={11} interval={0} tickFormatter={fmtMonthTick} />
+                    <YAxis stroke="#6b7280" fontSize={11} width={54} tickFormatter={(v) => fmtCOP(v)} />
+                    <Tooltip contentStyle={tipStyle} formatter={(v) => [fmtCOPfull(v), 'Balance']}
+                             labelFormatter={(m) => {
+                               const r = balanceData.find((b) => b.month === m);
+                               if (!r || r.Balance === null) return `${m} — sin nómina`;
+                               return `${m} · ingresos ${fmtCOP(r.ingresos)} − gastos ${fmtCOP(r.gastos)}`;
+                             }} />
+                    <ReferenceLine y={0} stroke="#6b7280" />
+                    <Bar dataKey="Balance" isAnimationActive={false} radius={[4, 4, 0, 0]}>
+                      {balanceData.map((b, i) => (
+                        <Cell key={i} fill={b.Balance >= 0 ? '#10b981' : '#f43f5e'} />
+                      ))}
+                      <LabelList dataKey="Balance" position="top" fontSize={10} fill="#9ca3af"
+                                 formatter={(v) => (v == null ? '' : fmtCOP(v))} />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
                 <p className="text-[10px] text-gray-500 mt-2">
-                  {balanceGaps} mes(es) sin nómina registrada — el balance queda en blanco
-                  ahí en vez de mostrar un déficit falso.
+                  Usa el salario base; los bonos de enero y febrero se excluyen para no aplastar la escala.
+                  Un mes sin barra es un mes cuya nómina aún no llega.
                 </p>
-              )}
-            </div>
-          </section>
+              </div>
+            </section>
+          )}
+
+          {vsIncome.length > 0 && (
+            <section>
+              <div className="flex items-baseline justify-between mb-2">
+                <h2 className="text-[11px] uppercase tracking-wide text-gray-400">Gasto vs ingreso</h2>
+                <span className="text-[10px] text-gray-500">% del ingreso · el espacio libre es lo que queda</span>
+              </div>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={vsIncome}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                    <XAxis dataKey="month" stroke="#6b7280" fontSize={11} interval={0} tickFormatter={fmtMonthTick} />
+                    <YAxis stroke="#6b7280" fontSize={11} width={44} domain={[0, 100]}
+                           ticks={[0, 25, 50, 75, 100]} tickFormatter={(v) => v + '%'} />
+                    <Tooltip contentStyle={tipStyle}
+                             formatter={(v, n, p) => [`${v}%  (${fmtCOP(n === 'Fijos' ? p.payload.fijosCop : p.payload.varCop)})`, n]}
+                             labelFormatter={(m) => {
+                               const r = vsIncome.find((x) => x.month === m);
+                               return `${m} · ingreso ${fmtCOP(r.ingreso)} · gasto ${(r.Fijos + r.Variables).toFixed(0)}%`;
+                             }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <ReferenceLine y={100} stroke="#4b5563" strokeDasharray="4 4"
+                                   label={{ value: 'ingreso', position: 'insideTopRight', fill: '#6b7280', fontSize: 10 }} />
+                    <Bar dataKey="Fijos"     stackId="i" fill="#6366f1" isAnimationActive={false} />
+                    <Bar dataKey="Variables" stackId="i" fill="#38bdf8" isAnimationActive={false} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+          )}
         </div>
       );
     }
