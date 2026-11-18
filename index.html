@@ -147,6 +147,17 @@
       return monthsList.slice(Math.max(0, end - n), end);
     }
 
+    // Trip spend, to ADD BACK wherever it's the bank balance that matters (cash
+    // flow, balance, savings). When the snapshot excludes trips from its spending
+    // aggregates they vanish from every spending view — the money is gone either
+    // way, so the balance must still count it. Zero if the snapshot isn't excluding.
+    function tripAddBack(data, ym) {
+      return data.trips_excluded ? ((data.monthly_trip || {})[ym] || 0) : 0;
+    }
+
+    // Edits queued in the Worker but not yet applied by a Sync: { tx_id: [kinds] }.
+    const PendingContext = React.createContext({});
+
     function computeMonthStats(data, month) {
       const budgets = data.suggested_budgets || {};
       const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
@@ -198,7 +209,9 @@
       const pacePct = variableBudget > 0
         ? Math.round((variable / variableBudget) * 100) : 0;
 
-      return { month, spendTotal, budgetTotal, income, net: income - spendTotal,
+      const tripSpend = tripAddBack(data, month);
+      return { month, spendTotal, budgetTotal, income, tripSpend,
+               net: income - spendTotal - tripSpend,
                daysInMonth, dayOfMonth, daysPct, projected, budgetRows,
                fixed, variable, variableBudget, pacePct };
     }
@@ -291,6 +304,24 @@
 
       const { data, loading, error, lastFetched, refetch } = useSnapshot(url, token);
 
+      // Edits waiting for the next Sync, so a row can say "⏳ pendiente" instead of
+      // looking like nothing happened (which invites sending the same edit twice).
+      const [pending, setPending] = useState({});
+      const loadPending = useCallback(async () => {
+        if (!workerSecret) { setPending({}); return; }
+        try {
+          const res = await fetch(`${workerUrl}/queue`, { headers: { 'Authorization': `Bearer ${workerSecret}` } });
+          if (!res.ok) return;
+          const j = await res.json();
+          const m = {};
+          for (const it of (j.edits || [])) {
+            const id = it.edit && it.edit.tx_id;
+            if (id != null) (m[id] = m[id] || []).push(it.edit.kind);
+          }
+          setPending(m);
+        } catch (_) { /* offline: just don't show badges */ }
+      }, [workerUrl, workerSecret]);
+
       // Helper: POST an edit to the Worker
       const postEdit = useCallback(async (edit) => {
         if (!workerSecret) {
@@ -313,12 +344,15 @@
             return false;
           }
           setToast({ type: 'ok', text: '✅ En cola — se aplica en próxima sync' });
+          loadPending();
           return true;
         } catch (e) {
           setToast({ type: 'error', text: `Error de red: ${e.message}` });
           return false;
         }
-      }, [workerUrl, workerSecret, userIdentity]);
+      }, [workerUrl, workerSecret, userIdentity, loadPending]);
+
+      useEffect(() => { loadPending(); }, [loadPending, data]);
 
       useEffect(() => {
         if (data?.summary?.current_month && !month) setMonth(data.summary.current_month);
@@ -359,6 +393,7 @@
       }
 
       return (
+        <PendingContext.Provider value={pending}>
         <div className="min-h-screen">
           <Header data={data} month={month} setMonth={setMonth}
             lastFetched={lastFetched} loading={loading}
@@ -373,6 +408,7 @@
             )}
             {tab === 'home' && <HomeView data={data} month={month} onSelectTx={setSelectedTx} />}
             {tab === 'trends' && <TrendsView data={data} month={month} />}
+            {tab === 'trips' && <TripsView data={data} onSelectTx={setSelectedTx} postEdit={postEdit} />}
             {tab === 'budgets' && <BudgetsView data={data} />}
             {tab === 'salary' && <SalaryView data={data} />}
             {tab === 'all' && <AllTxsView data={data} onSelectTx={setSelectedTx} />}
@@ -399,6 +435,7 @@
           )}
           {toast && <Toast toast={toast} onDismiss={() => setToast(null)} />}
         </div>
+        </PendingContext.Provider>
       );
     }
 
@@ -522,6 +559,7 @@
       const tabs = [
         { id: 'home', label: 'Inicio' },
         { id: 'trends', label: 'Tendencias' },
+        { id: 'trips', label: 'Viajes' },
         { id: 'budgets', label: 'Presupuestos' },
         { id: 'salary', label: 'Salario' },
         { id: 'all', label: 'Todas las transacciones' },
@@ -607,7 +645,8 @@
             color={budgetColor(yearPct, yearStats.elapsedPct)}
             footer={`${yearStats.elapsedPct}% del año transcurrido`} />
           <KPICard title="Flujo de caja del mes" primary={fmtCOPfull(stats.net)}
-            secondary={`Ingresos ${fmtCOPfull(stats.income)} − Gastos ${fmtCOPfull(stats.spendTotal)}`}
+            secondary={`Ingresos ${fmtCOPfull(stats.income)} − Gastos ${fmtCOPfull(stats.spendTotal + stats.tripSpend)}`}
+            note={stats.tripSpend > 0 ? `Incluye viajes: ${fmtCOPfull(stats.tripSpend)}` : null}
             progress={null}
             color={stats.net >= 0 ? 'bg-emerald-500' : 'bg-red-500'}
             footer={stats.net >= 0 ? '✓ En positivo' : '⚠ Gastos > ingresos'}
@@ -770,9 +809,12 @@
     function TxRow({ tx, onClick }) {
       const isUncat = !tx.category_id;
       const isIncome = INCOME_CATS.has(tx.parent);
-      const notMine  = tx.is_split && tx.split_owed >= tx.amount;
-      const partial  = tx.is_split && tx.split_owed > 0 && tx.split_owed < tx.amount;
+      // Boolean() matters: is_split is the NUMBER 0 for ordinary charges, and
+      // `0 && <pill/>` makes React print a literal "0" next to every merchant.
+      const notMine  = Boolean(tx.is_split && tx.split_owed >= tx.amount);
+      const partial  = Boolean(tx.is_split && tx.split_owed > 0 && tx.split_owed < tx.amount);
       const estimated = tx.source === 'Estimado';
+      const queued = React.useContext(PendingContext)[tx.id];
       return (
         <button onClick={onClick}
           className="w-full text-left px-3 py-2 hover:bg-gray-800/50 transition-colors flex items-center gap-2">
@@ -783,6 +825,8 @@
               {notMine && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/50 border border-amber-800 text-amber-300 flex-shrink-0">🚫 No fue mío</span>}
               {partial && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/40 border border-amber-800 text-amber-300 flex-shrink-0">➗ Split</span>}
               {estimated && <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-900/40 border border-sky-800 text-sky-300 flex-shrink-0">~ estimado</span>}
+              {tx.trip_id && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/30 border border-amber-800/70 text-amber-300 flex-shrink-0">✈ {tx.trip_name}</span>}
+              {queued && <span title={`En cola: ${queued.join(', ')}`} className="text-[9px] px-1.5 py-0.5 rounded bg-violet-900/40 border border-violet-700 text-violet-300 flex-shrink-0">⏳ pendiente de sync</span>}
             </div>
             <div className="text-[10px] text-gray-500 truncate">
               {isUncat ? <span className="text-amber-500">⚠ sin categoría</span> : <span>{tx.label}</span>}
@@ -793,6 +837,145 @@
           </div>
           <ChevronRight size={12} className="text-gray-600 flex-shrink-0" />
         </button>
+      );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Viajes — one card per trip. Trips are kept out of the main spending views;
+    // this is where they live. Sending a charge back to the main dashboard is a
+    // manual last resort, so it has to be easy — including in bulk.
+    // ────────────────────────────────────────────────────────────────────────
+    function TripsView({ data, onSelectTx, postEdit }) {
+      const trips = data.trips || [];
+      const [selected, setSelected] = useState({});       // tx_id → true
+      const [busy, setBusy] = useState(false);
+      const MONTH_ABBR = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+      const fmtDay = (iso) => { const [, m, d] = iso.split('-'); return `${parseInt(d, 10)} ${MONTH_ABBR[parseInt(m, 10) - 1]}`; };
+
+      if (!trips.length) {
+        return (
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-sm text-gray-400">
+            Aún no hay viajes. Cuando creemos uno, sus gastos salen del dashboard principal y aparecen aquí.
+          </div>
+        );
+      }
+
+      const selectedIds = Object.keys(selected).filter((k) => selected[k]).map(Number);
+      const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }));
+
+      const sendBack = async () => {
+        if (!selectedIds.length) return;
+        if (!confirm(`¿Enviar ${selectedIds.length} transacción(es) de vuelta al dashboard principal?`)) return;
+        setBusy(true);
+        let ok = 0;
+        for (const id of selectedIds) {
+          if (await postEdit({ kind: 'trip', tx_id: id, trip_id: null })) ok += 1; else break;
+        }
+        setBusy(false);
+        if (ok === selectedIds.length) setSelected({});
+      };
+
+      return (
+        <div className="space-y-8">
+          {trips.map((t) => {
+            const rows = data.transactions
+              .filter((x) => x.trip_id === t.id)
+              .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+            const pre = rows.filter((x) => x.date < t.start).reduce((s, x) => s + x.share, 0);
+            const during = rows.filter((x) => x.date >= t.start).reduce((s, x) => s + x.share, 0);
+            const perDay = t.days ? Math.round(during / t.days) : 0;
+            const catEntries = Object.entries(t.by_category || {});
+            const catMax = Math.max(1, ...catEntries.map(([, v]) => v));
+            const dayData = [];
+            for (let i = 0; i < t.days; i++) {
+              const d = new Date(t.start + 'T00:00:00'); d.setDate(d.getDate() + i);
+              const iso = d.toISOString().slice(0, 10);
+              dayData.push({ day: fmtDay(iso), total: (t.by_day || {})[iso] || 0 });
+            }
+            const mineSelected = rows.filter((x) => selected[x.id]).length;
+            return (
+              <section key={t.id}>
+                <div className="flex items-baseline justify-between mb-2">
+                  <h2 className="text-[11px] uppercase tracking-wide text-gray-400">✈ {t.name}</h2>
+                  <span className="text-[10px] text-gray-500">{fmtDay(t.start)} → {fmtDay(t.end)} · {t.days} días · {t.tx_count} cargos</span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-gray-900 border border-amber-800/50 rounded-xl p-4">
+                    <div className="text-[10px] uppercase tracking-wide text-gray-400">Total del viaje</div>
+                    <div className="text-xl font-semibold text-amber-300 mt-1">{fmtCOPfull(t.total)}</div>
+                  </div>
+                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                    <div className="text-[10px] uppercase tracking-wide text-gray-400">Pre-pagado</div>
+                    <div className="text-lg font-semibold mt-1">{fmtCOPfull(pre)}</div>
+                    <div className="text-[10px] text-gray-500">vuelos, hospedaje…</div>
+                  </div>
+                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                    <div className="text-[10px] uppercase tracking-wide text-gray-400">Durante el viaje</div>
+                    <div className="text-lg font-semibold mt-1">{fmtCOPfull(during)}</div>
+                  </div>
+                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                    <div className="text-[10px] uppercase tracking-wide text-gray-400">Por día (sin pre-pagado)</div>
+                    <div className="text-lg font-semibold mt-1">{fmtCOPfull(perDay)}</div>
+                    {t.budget ? <div className="text-[10px] text-gray-500">presupuesto {fmtCOPfull(t.budget)}</div> : null}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                    <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-3">Por categoría</div>
+                    <div className="space-y-2">
+                      {catEntries.map(([name, v]) => (
+                        <div key={name}>
+                          <div className="flex justify-between text-xs"><span>{name}</span><span className="text-gray-400">{fmtCOPfull(v)}</span></div>
+                          <div className="h-1.5 rounded bg-gray-800 mt-1"><div className="h-1.5 rounded bg-amber-500" style={{ width: `${(v / catMax) * 100}%` }} /></div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                    <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-2">Gasto por día (durante el viaje)</div>
+                    <ResponsiveContainer width="100%" height={190}>
+                      <BarChart data={dayData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                        <XAxis dataKey="day" stroke="#6b7280" fontSize={11} interval={0} />
+                        <YAxis stroke="#6b7280" fontSize={11} width={48} tickFormatter={(v) => fmtCOP(v)} />
+                        <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #1f2937', borderRadius: '0.5rem' }}
+                                 formatter={(v) => [fmtCOPfull(v), 'Gasto']} />
+                        <Bar dataKey="total" fill="#f59e0b" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="mt-3 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-gray-800 flex items-center justify-between">
+                    <span className="text-[10px] uppercase tracking-wide text-gray-400">Cargos del viaje</span>
+                    {mineSelected > 0 ? (
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setSelected({})} className="text-[11px] text-gray-400 hover:text-white">Limpiar</button>
+                        <button onClick={sendBack} disabled={busy}
+                                className="text-[11px] px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-50">
+                          {busy ? 'Enviando…' : `Enviar ${mineSelected} al dashboard principal`}
+                        </button>
+                      </div>
+                    ) : <span className="text-[10px] text-gray-600">marca cargos para devolverlos al dashboard principal</span>}
+                  </div>
+                  <div className="divide-y divide-gray-800/60">
+                    {rows.map((x) => (
+                      <div key={x.id} className="flex items-center">
+                        <label className="pl-3 pr-1 py-2 cursor-pointer" onClick={(e) => e.stopPropagation()}>
+                          <input type="checkbox" checked={!!selected[x.id]} onChange={() => toggle(x.id)} />
+                        </label>
+                        <div className="flex-1 min-w-0"><TxRow tx={x} onClick={() => onSelectTx(x)} /></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            );
+          })}
+        </div>
       );
     }
 
@@ -868,8 +1051,11 @@
       const firstIncome = months12.find((m) => (baseByMonth[m] || 0) > 0);
       const balanceData = (firstIncome ? months12.filter((m) => m >= firstIncome) : []).map((m) => {
         const ingresos = baseByMonth[m] || 0;
-        const gastos = spendOf(m);
-        return { month: m, ingresos, gastos, Balance: ingresos > 0 ? ingresos - gastos : null };
+        const gastosMain = spendOf(m);              // without trips (when excluded)
+        const viajes = tripAddBack(data, m);        // …added back: the money is gone
+        const gastos = gastosMain + viajes;
+        return { month: m, ingresos, gastos, gastosMain, viajes,
+                 Balance: ingresos > 0 ? ingresos - gastos : null };
       });
       const acumulado = balanceData.reduce((s, b) => s + (b.Balance || 0), 0);
 
@@ -880,9 +1066,10 @@
         const fijos = (data.monthly_fixed || {})[b.month] || 0;
         return {
           month: b.month, ingreso: b.ingresos,
-          fijosCop: fijos, varCop: Math.max(0, b.gastos - fijos),
+          fijosCop: fijos, varCop: Math.max(0, b.gastosMain - fijos), viajesCop: b.viajes,
           'Fijos': +((fijos / b.ingresos) * 100).toFixed(1),
-          'Variables': +((Math.max(0, b.gastos - fijos) / b.ingresos) * 100).toFixed(1),
+          'Variables': +((Math.max(0, b.gastosMain - fijos) / b.ingresos) * 100).toFixed(1),
+          'Viajes': +((b.viajes / b.ingresos) * 100).toFixed(1),
         };
       });
 
@@ -894,7 +1081,7 @@
             <div className="flex items-baseline justify-between mb-2">
               <h2 className="text-[11px] uppercase tracking-wide text-gray-400">Gasto total por mes</h2>
               <span className="text-[10px] text-gray-500">
-                Promedio {fmtCOPfull(avgTotal)}
+                {data.trips_excluded && 'sin viajes · '}Promedio {fmtCOPfull(avgTotal)}
                 {hasPartial && <span className="text-amber-500/80"> · ○ mes en curso (parcial)</span>}
               </span>
             </div>
@@ -989,6 +1176,7 @@
                 <p className="text-[10px] text-gray-500 mt-2">
                   Usa el salario base; los bonos de enero y febrero se excluyen para no aplastar la escala.
                   Un mes sin barra es un mes cuya nómina aún no llega.
+                  {data.trips_excluded && ' Los viajes sí cuentan aquí (el dinero ya salió), aunque no aparezcan en los gráficos de gasto.'}
                 </p>
               </div>
             </section>
@@ -1008,16 +1196,18 @@
                     <YAxis stroke="#6b7280" fontSize={11} width={44} domain={[0, 100]}
                            ticks={[0, 25, 50, 75, 100]} tickFormatter={(v) => v + '%'} />
                     <Tooltip contentStyle={tipStyle}
-                             formatter={(v, n, p) => [`${v}%  (${fmtCOP(n === 'Fijos' ? p.payload.fijosCop : p.payload.varCop)})`, n]}
+                             formatter={(v, n, p) => [`${v}%  (${fmtCOP(n === 'Fijos' ? p.payload.fijosCop : n === 'Viajes' ? p.payload.viajesCop : p.payload.varCop)})`, n]}
                              labelFormatter={(m) => {
                                const r = vsIncome.find((x) => x.month === m);
-                               return `${m} · ingreso ${fmtCOP(r.ingreso)} · gasto ${(r.Fijos + r.Variables).toFixed(0)}%`;
+                               return `${m} · ingreso ${fmtCOP(r.ingreso)} · gasto ${(r.Fijos + r.Variables + r.Viajes).toFixed(0)}%`;
                              }} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
                     <ReferenceLine y={100} stroke="#4b5563" strokeDasharray="4 4"
                                    label={{ value: 'ingreso', position: 'insideTopRight', fill: '#6b7280', fontSize: 10 }} />
                     <Bar dataKey="Fijos"     stackId="i" fill="#6366f1" isAnimationActive={false} />
                     <Bar dataKey="Variables" stackId="i" fill="#38bdf8" isAnimationActive={false} />
+                    {vsIncome.some((r) => r.Viajes > 0) &&
+                      <Bar dataKey="Viajes" stackId="i" fill="#f59e0b" isAnimationActive={false} />}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -1267,7 +1457,12 @@
       const [amount, setAmount] = useState(tx.amount);
       const [note, setNote] = useState(tx.notes || '');
       const [addedBy, setAddedBy] = useState(tx.added_by || '');
+      const [tripId, setTripId] = useState(tx.trip_id != null ? String(tx.trip_id) : '');
       const [submitting, setSubmitting] = useState(false);
+      const tripOptions = useMemo(() => [
+        { value: '', label: 'Ninguno (dashboard principal)' },
+        ...(data.trips || []).map((t) => ({ value: String(t.id), label: `✈ ${t.name}` })),
+      ], [data]);
 
       const allPaths = useMemo(() => {
         const out = new Set();
@@ -1302,6 +1497,10 @@
         }
         if (addedBy !== (tx.added_by || '')) {
           await submit({ kind: 'tag', added_by: addedBy || null });
+          return;
+        }
+        if (tripId !== (tx.trip_id != null ? String(tx.trip_id) : '')) {
+          await submit({ kind: 'trip', trip_id: tripId === '' ? null : parseInt(tripId, 10) });
           return;
         }
         setToast?.({ type: 'ok', text: 'No hay cambios' });
@@ -1339,6 +1538,10 @@
                 value={tx.category_id ? tx.label : <span className="text-amber-400">Sin categoría</span>} />}
               {!editing && <DetailRow label="Atribución"
                 value={tx.added_by ? <span className="text-blue-300">{tx.added_by}</span> : <span className="text-gray-500">— (compartido / sin etiqueta)</span>} />}
+              {!editing && (data.trips || []).length > 0 && <DetailRow label="Viaje"
+                value={tx.trip_id
+                  ? <span className="text-amber-300">✈ {tx.trip_name} <span className="text-gray-500 text-[10px]">({tx.trip_source === 'manual' ? 'a mano' : 'automático'})</span></span>
+                  : <span className="text-gray-500">— (dashboard principal)</span>} />}
               <DetailRow label="Origen" value={tx.source} />
               <DetailRow label="Pago" value={tx.payment_method || '—'} />
               {!editing && tx.notes && <DetailRow label="Notas" value={tx.notes} />}
@@ -1367,6 +1570,13 @@
                         { value: 'lau',   label: 'Lau' },
                       ]} />
                   </label>
+
+                  {(data.trips || []).length > 0 && (
+                    <label className="block">
+                      <span className="text-[11px] uppercase tracking-wide text-gray-400 block mb-1">Viaje</span>
+                      <ChoiceSelect value={tripId} onChange={setTripId} options={tripOptions} />
+                    </label>
+                  )}
 
                   <label className="block">
                     <span className="text-[11px] uppercase tracking-wide text-gray-400">Nota</span>
@@ -1406,7 +1616,7 @@
 
               <div className="pt-3 mt-3 border-t border-gray-800">
                 <p className="text-[10px] text-gray-500">
-                  Los cambios se envían a Kikito (Worker en Cloudflare) y se aplican en la próxima sync (8am / 8pm).
+                  Los cambios se envían a Kikito (Worker en Cloudflare) y se aplican en la próxima sync.
                 </p>
               </div>
             </div>
