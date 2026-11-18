@@ -154,6 +154,45 @@
     function tripAddBack(data, ym) {
       return data.trips_excluded ? ((data.monthly_trip || {})[ym] || 0) : 0;
     }
+    // Same contract for spending from each person's OWN money (scope santi / lau):
+    // out of the household views when the snapshot excludes it, but never out of
+    // the balance. The export counts a charge in at most one bucket, so adding
+    // trips + personal back can't double count.
+    function personalAddBack(data, ym) {
+      if (!data.personal_excluded) return 0;
+      return Object.values(data.monthly_personal || {}).reduce((s, byM) => s + (byM[ym] || 0), 0);
+    }
+
+    // How much personal money LEAVES THE HOUSEHOLD BALANCE in a month.
+    //
+    // The allowance is gone from the household the moment each person keeps it:
+    // income 100, each keeps 10 → 20 has left, whatever either does with it. So the
+    // balance deducts the ALLOWANCE (2 × % × household base income), never the
+    // personal charges that happen to be tagged — Lau may spend hers on accounts
+    // this tracker never sees, so the tagged amount is always incomplete. Tags are
+    // informational (how the allowance was used) and are never deducted a second
+    // time; overspending is flagged in the Personal tab, not deducted here.
+    //
+    // It only applies from `household_since` (default Nov 2026) so moving the
+    // slider can't rewrite months before the arrangement existed. Where it can't
+    // apply (no % saved yet, before the start month, or a month with no income to
+    // take a % of) we fall back to the tagged personal spend, so nothing that left
+    // the household views silently disappears from the balance.
+    const ymNum = (ym) => parseInt(String(ym).replace('-', ''), 10);
+    function householdBaseIncome(data, ym) {
+      return (data.income_transactions || [])
+        .filter((t) => t.ym === ym && t.parent !== 'Ingresos extras')
+        .reduce((s, t) => s + t.amount, 0);
+    }
+    function personalOutflow(data, ym) {
+      if (!data.personal_excluded) return { amount: 0, mode: 'none' };   // already inside the household totals
+      const tagged = personalAddBack(data, ym);
+      const pct = data.settings?.allowance_pct?.value;
+      const since = data.settings?.household_since?.value ?? 202611;
+      const income = householdBaseIncome(data, ym);
+      if (pct === undefined || ymNum(ym) < since || income <= 0) return { amount: tagged, mode: 'tagged' };
+      return { amount: Math.round(2 * (pct / 100) * income), mode: 'allowance' };
+    }
 
     // Edits queued in the Worker but not yet applied by a Sync: { tx_id: [kinds] }.
     const PendingContext = React.createContext({});
@@ -210,8 +249,10 @@
         ? Math.round((variable / variableBudget) * 100) : 0;
 
       const tripSpend = tripAddBack(data, month);
-      return { month, spendTotal, budgetTotal, income, tripSpend,
-               net: income - spendTotal - tripSpend,
+      const po = personalOutflow(data, month);
+      const personalSpend = po.amount, personalMode = po.mode;
+      return { month, spendTotal, budgetTotal, income, tripSpend, personalSpend, personalMode,
+               net: income - spendTotal - tripSpend - personalSpend,
                daysInMonth, dayOfMonth, daysPct, projected, budgetRows,
                fixed, variable, variableBudget, pacePct };
     }
@@ -317,6 +358,8 @@
           for (const it of (j.edits || [])) {
             const id = it.edit && it.edit.tx_id;
             if (id != null) (m[id] = m[id] || []).push(it.edit.kind);
+            // a queued setting has no transaction: key it by name so its slider can say "en cola"
+            if (it.edit && it.edit.kind === 'setting') m[`setting:${it.edit.key}`] = it.edit.value;
           }
           setPending(m);
         } catch (_) { /* offline: just don't show badges */ }
@@ -409,6 +452,7 @@
             {tab === 'home' && <HomeView data={data} month={month} onSelectTx={setSelectedTx} />}
             {tab === 'trends' && <TrendsView data={data} month={month} />}
             {tab === 'trips' && <TripsView data={data} onSelectTx={setSelectedTx} postEdit={postEdit} />}
+            {tab === 'personal' && <PersonalView data={data} month={month} onSelectTx={setSelectedTx} postEdit={postEdit} userIdentity={userIdentity} />}
             {tab === 'budgets' && <BudgetsView data={data} />}
             {tab === 'salary' && <SalaryView data={data} />}
             {tab === 'all' && <AllTxsView data={data} onSelectTx={setSelectedTx} />}
@@ -560,6 +604,7 @@
         { id: 'home', label: 'Inicio' },
         { id: 'trends', label: 'Tendencias' },
         { id: 'trips', label: 'Viajes' },
+        { id: 'personal', label: 'Personal' },
         { id: 'budgets', label: 'Presupuestos' },
         { id: 'salary', label: 'Salario' },
         { id: 'all', label: 'Todas las transacciones' },
@@ -645,8 +690,12 @@
             color={budgetColor(yearPct, yearStats.elapsedPct)}
             footer={`${yearStats.elapsedPct}% del año transcurrido`} />
           <KPICard title="Flujo de caja del mes" primary={fmtCOPfull(stats.net)}
-            secondary={`Ingresos ${fmtCOPfull(stats.income)} − Gastos ${fmtCOPfull(stats.spendTotal + stats.tripSpend)}`}
-            note={stats.tripSpend > 0 ? `Incluye viajes: ${fmtCOPfull(stats.tripSpend)}` : null}
+            secondary={`Ingresos ${fmtCOPfull(stats.income)} − Gastos ${fmtCOPfull(stats.spendTotal + stats.tripSpend + stats.personalSpend)}`}
+            note={(() => {
+              const bits = [stats.tripSpend > 0 && `viajes ${fmtCOPfull(stats.tripSpend)}`,
+                            stats.personalSpend > 0 && `${stats.personalMode === 'allowance' ? 'allowances' : 'personal'} ${fmtCOPfull(stats.personalSpend)}`].filter(Boolean);
+              return bits.length ? 'Incluye ' + bits.join(' · ') : null;
+            })()}
             progress={null}
             color={stats.net >= 0 ? 'bg-emerald-500' : 'bg-red-500'}
             footer={stats.net >= 0 ? '✓ En positivo' : '⚠ Gastos > ingresos'}
@@ -826,6 +875,7 @@
               {partial && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/40 border border-amber-800 text-amber-300 flex-shrink-0">➗ Split</span>}
               {estimated && <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-900/40 border border-sky-800 text-sky-300 flex-shrink-0">~ estimado</span>}
               {tx.trip_id && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-900/30 border border-amber-800/70 text-amber-300 flex-shrink-0">✈ {tx.trip_name}</span>}
+              {tx.scope && !tx.trip_id && <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-900/30 border border-violet-800/70 text-violet-300 flex-shrink-0 capitalize">👤 {tx.scope}</span>}
               {queued && <span title={`En cola: ${queued.join(', ')}`} className="text-[9px] px-1.5 py-0.5 rounded bg-violet-900/40 border border-violet-700 text-violet-300 flex-shrink-0">⏳ pendiente de sync</span>}
             </div>
             <div className="text-[10px] text-gray-500 truncate">
@@ -979,6 +1029,200 @@
       );
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Personal — spending from each person's OWN money, against the allowance.
+    // The allowance is a % of household income that EACH person keeps (so the
+    // household gives up 2×). The % is a shared setting: the slider previews
+    // instantly, and only "Guardar" sends it (through the edit queue, like every
+    // other change), so both of you see what was saved, not what's on one screen.
+    // ────────────────────────────────────────────────────────────────────────
+    function PersonalView({ data, month, onSelectTx, postEdit, userIdentity }) {
+      const pending = React.useContext(PendingContext);
+      const [person, setPerson] = useState(['santi', 'lau'].includes(userIdentity) ? userIdentity : 'santi');
+      const [touched, setTouched] = useState(false);
+      const [pctLocal, setPctLocal] = useState(10);
+      const [selected, setSelected] = useState({});
+      const [busy, setBusy] = useState(false);
+      const [sinceLocal, setSinceLocal] = useState(null);           // 'YYYY-MM' while editing
+
+      const savedSince = data.settings?.household_since?.value;    // YYYYMM number | undefined
+      const queuedSince = pending['setting:household_since'];
+      const sinceNum = queuedSince ?? savedSince ?? 202611;        // default: Nov 2026
+      const toYm = (n) => `${Math.floor(n / 100)}-${String(n % 100).padStart(2, '0')}`;
+      const sinceShown = sinceLocal ?? toYm(sinceNum);
+      const sinceDirty = sinceLocal !== null && sinceLocal !== toYm(sinceNum);
+
+      const saved = data.settings?.allowance_pct?.value;          // number | undefined
+      const queued = pending['setting:allowance_pct'];             // value waiting for a Sync | undefined
+      const pct = touched ? pctLocal : (queued ?? saved ?? 10);
+      const isSet = saved !== undefined || queued !== undefined;
+      const dirty = touched && pctLocal !== (queued ?? saved);
+
+      // Household income for the month — base income only, so a bonus month
+      // doesn't blow the allowance up (same rule as the Balance chart).
+      const inc = { santi: 0, lau: 0, otros: 0 };
+      (data.income_transactions || [])
+        .filter((t) => t.ym === month && t.parent !== 'Ingresos extras')
+        .forEach((t) => { inc[t.person === 'lau' ? 'lau' : t.person === 'santi' ? 'santi' : 'otros'] += t.amount; });
+      const householdIncome = inc.santi + inc.lau + inc.otros;
+      const allowance = Math.round((pct / 100) * householdIncome);
+      const spent = (data.monthly_personal?.[person] || {})[month] || 0;
+      const left = allowance - spent;
+      const usedPct = allowance > 0 ? Math.round((spent / allowance) * 100) : 0;
+      const barColor = usedPct >= 100 ? 'bg-red-500' : usedPct >= 85 ? 'bg-orange-500' : usedPct >= 70 ? 'bg-yellow-500' : 'bg-emerald-500';
+
+      const rows = data.transactions
+        .filter((t) => t.scope === person && !t.trip_id && t.ym === month)
+        .sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')));
+      const selectedIds = rows.filter((r) => selected[r.id]).map((r) => r.id);
+
+      const save = async () => {
+        setBusy(true);
+        const ok = await postEdit({ kind: 'setting', key: 'allowance_pct', value: pctLocal });
+        setBusy(false);
+        if (ok) setTouched(false);
+      };
+      const saveSince = async () => {
+        if (!/^\d{4}-\d{2}$/.test(sinceShown)) return;
+        setBusy(true);
+        const ok = await postEdit({ kind: 'setting', key: 'household_since', value: parseInt(sinceShown.replace('-', ''), 10) });
+        setBusy(false);
+        if (ok) setSinceLocal(null);
+      };
+      // What really leaves the household balance this month (see personalOutflow).
+      const outflow = personalOutflow(data, month);
+      const overspent = spent > allowance && allowance > 0;
+      const sendBack = async () => {
+        if (!selectedIds.length) return;
+        if (!confirm(`¿Devolver ${selectedIds.length} cargo(s) al hogar?`)) return;
+        setBusy(true);
+        let ok = 0;
+        for (const id of selectedIds) { if (await postEdit({ kind: 'scope', tx_id: id, scope: null })) ok += 1; else break; }
+        setBusy(false);
+        if (ok === selectedIds.length) setSelected({});
+      };
+
+      return (
+        <div className="space-y-6">
+          <div className="flex items-center gap-2">
+            {['santi', 'lau'].map((p) => (
+              <button key={p} onClick={() => { setPerson(p); setSelected({}); }}
+                className={`px-3 py-1 rounded text-xs capitalize ${p === person ? 'bg-violet-600 text-white' : 'bg-gray-800 text-gray-300'}`}>{p}</button>
+            ))}
+            <span className="text-[10px] text-gray-500 ml-2">{month}</span>
+          </div>
+
+          <section>
+            <h2 className="text-[11px] uppercase tracking-wide text-gray-400 mb-2">Allowance personal</h2>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-gray-300">% del ingreso del hogar que se queda cada uno</span>
+                  <div className="flex items-center gap-1">
+                    <input type="number" min="0" max="30" step="0.5" value={pct}
+                      onChange={(e) => { setTouched(true); setPctLocal(Math.max(0, Math.min(30, parseFloat(e.target.value) || 0))); }}
+                      className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-right" />
+                    <span className="text-xs text-gray-400">%</span>
+                  </div>
+                </div>
+                <input type="range" min="0" max="30" step="0.5" value={pct} className="w-full accent-violet-500"
+                  onChange={(e) => { setTouched(true); setPctLocal(parseFloat(e.target.value)); }} />
+                <div className="flex items-center justify-between mt-1 text-[10px]">
+                  <span className="text-gray-500">
+                    {queued !== undefined ? `⏳ ${queued}% en cola — se aplica en la próxima sync`
+                      : saved !== undefined ? `Guardado: ${saved}%${data.settings.allowance_pct.updated_by ? ` (por ${data.settings.allowance_pct.updated_by})` : ''}`
+                      : 'Aún sin definir — mueve el control y guarda'}
+                  </span>
+                  {dirty
+                    ? <button onClick={save} disabled={busy} className="px-2.5 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-[11px] text-white">{busy ? 'Enviando…' : `Guardar ${pctLocal}%`}</button>
+                    : isSet ? null : <span className="text-amber-400/80">vista previa con {pct}%</span>}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                <div><div className="text-[10px] uppercase text-gray-400">Ingreso del hogar</div>
+                     <div className="font-medium">{fmtCOPfull(householdIncome)}</div>
+                     <div className="text-[10px] text-gray-500">Santi {fmtCOP(inc.santi)} · Lau {fmtCOP(inc.lau)}</div></div>
+                <div><div className="text-[10px] uppercase text-gray-400">Allowance de cada uno</div>
+                     <div className="font-medium text-violet-300">{fmtCOPfull(allowance)}</div>
+                     <div className="text-[10px] text-gray-500">total fuera del hogar: {fmtCOPfull(allowance * 2)}</div></div>
+                <div><div className="text-[10px] uppercase text-gray-400 capitalize">Gastado — {person}</div>
+                     <div className="font-medium">{fmtCOPfull(spent)}</div></div>
+                <div><div className="text-[10px] uppercase text-gray-400">Te queda (según lo registrado)</div>
+                     <div className={`font-medium ${left < 0 ? 'text-red-400' : 'text-emerald-300'}`}>{fmtCOPfull(left)}</div></div>
+              </div>
+
+              <div>
+                <div className="h-2 rounded bg-gray-800"><div className={`h-2 rounded ${barColor}`} style={{ width: `${Math.min(usedPct, 100)}%` }} /></div>
+                <div className="text-[10px] text-gray-500 mt-1">{allowance > 0 ? `${usedPct}% del allowance registrado usado` : 'Sin ingreso del hogar registrado este mes'}</div>
+                {overspent && <div className="text-[10px] text-orange-400 mt-1">Lo registrado supera el allowance. No se descuenta de nuevo del balance: es solo un aviso.</div>}
+              </div>
+
+              <div className="rounded border border-violet-900/60 bg-violet-950/20 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-gray-400">Sale del balance del hogar en {month}</div>
+                <div className="text-sm font-medium text-violet-300">{fmtCOPfull(outflow.amount)}
+                  <span className="text-[10px] text-gray-500 font-normal ml-2">
+                    {outflow.mode === 'allowance' ? `= 2 × ${saved ?? queued ?? pct}% del ingreso del hogar`
+                      : outflow.mode === 'tagged' ? 'solo lo registrado: el allowance aún no aplica este mes'
+                      : 'el gasto personal sigue dentro de los totales del hogar'}
+                  </span></div>
+                <div className="text-[10px] text-gray-500 mt-1">
+                  El allowance sale del hogar desde el momento en que cada uno lo recibe, lo gaste o no. Lo registrado abajo es solo informativo:
+                  {person === 'lau' ? ' Lau puede gastar desde otras cuentas que este tablero no ve.' : ' solo se ve lo que pasa por las tarjetas registradas.'}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
+                <span>El esquema de allowance rige desde:</span>
+                <input type="month" value={sinceShown} onChange={(e) => setSinceLocal(e.target.value)}
+                       className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
+                {sinceDirty
+                  ? <button onClick={saveSince} disabled={busy} className="px-2.5 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white">Guardar</button>
+                  : <span className="text-gray-500">{queuedSince !== undefined ? '⏳ en cola' : savedSince !== undefined ? 'guardado' : 'por defecto'}</span>}
+                <span className="text-gray-600">Antes de ese mes el balance solo descuenta los cargos personales registrados.</span>
+              </div>
+
+              {inc.lau === 0 && (
+                <div className="text-[11px] text-amber-400/90 bg-amber-950/30 border border-amber-900/60 rounded px-3 py-2">
+                  Falta registrar el ingreso de Lau este mes: el ingreso del hogar incluye solo a Santi, así que estas cifras son provisionales.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section>
+            <div className="flex items-baseline justify-between mb-2">
+              <h2 className="text-[11px] uppercase tracking-wide text-gray-400 capitalize">Gastos personales de {person}</h2>
+              <span className="text-[10px] text-gray-500">{rows.length} cargo(s) · {fmtCOPfull(spent)}</span>
+            </div>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+              <div className="px-3 py-2 border-b border-gray-800 flex items-center justify-between">
+                <span className="text-[10px] text-gray-500">Para marcar un cargo como personal: ábrelo → Editar → Ámbito</span>
+                {selectedIds.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setSelected({})} className="text-[11px] text-gray-400 hover:text-white">Limpiar</button>
+                    <button onClick={sendBack} disabled={busy} className="text-[11px] px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-50">
+                      {busy ? 'Enviando…' : `Devolver ${selectedIds.length} al hogar`}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {rows.length === 0
+                ? <div className="px-4 py-6 text-sm text-gray-500">Ningún cargo personal de {person} en {month}.</div>
+                : <div className="divide-y divide-gray-800/60">
+                    {rows.map((x) => (
+                      <div key={x.id} className="flex items-center">
+                        <label className="pl-3 pr-1 py-2 cursor-pointer"><input type="checkbox" checked={!!selected[x.id]} onChange={() => setSelected((s) => ({ ...s, [x.id]: !s[x.id] }))} /></label>
+                        <div className="flex-1 min-w-0"><TxRow tx={x} onClick={() => onSelectTx(x)} /></div>
+                      </div>
+                    ))}
+                  </div>}
+            </div>
+          </section>
+        </div>
+      );
+    }
+
     function TrendsView({ data, month }) {
       const months12 = lastNMonths(data.months, 12, month);
       const parents = (data.categories?.parents || []).filter((p) => !INCOME_CATS.has(p.name));
@@ -1053,8 +1297,9 @@
         const ingresos = baseByMonth[m] || 0;
         const gastosMain = spendOf(m);              // without trips (when excluded)
         const viajes = tripAddBack(data, m);        // …added back: the money is gone
-        const gastos = gastosMain + viajes;
-        return { month: m, ingresos, gastos, gastosMain, viajes,
+        const personal = personalOutflow(data, m).amount;  // allowances leave the household balance
+        const gastos = gastosMain + viajes + personal;
+        return { month: m, ingresos, gastos, gastosMain, viajes, personal,
                  Balance: ingresos > 0 ? ingresos - gastos : null };
       });
       const acumulado = balanceData.reduce((s, b) => s + (b.Balance || 0), 0);
@@ -1066,10 +1311,11 @@
         const fijos = (data.monthly_fixed || {})[b.month] || 0;
         return {
           month: b.month, ingreso: b.ingresos,
-          fijosCop: fijos, varCop: Math.max(0, b.gastosMain - fijos), viajesCop: b.viajes,
+          fijosCop: fijos, varCop: Math.max(0, b.gastosMain - fijos), viajesCop: b.viajes, personalCop: b.personal,
           'Fijos': +((fijos / b.ingresos) * 100).toFixed(1),
           'Variables': +((Math.max(0, b.gastosMain - fijos) / b.ingresos) * 100).toFixed(1),
           'Viajes': +((b.viajes / b.ingresos) * 100).toFixed(1),
+          'Personal': +((b.personal / b.ingresos) * 100).toFixed(1),
         };
       });
 
@@ -1081,7 +1327,7 @@
             <div className="flex items-baseline justify-between mb-2">
               <h2 className="text-[11px] uppercase tracking-wide text-gray-400">Gasto total por mes</h2>
               <span className="text-[10px] text-gray-500">
-                {data.trips_excluded && 'sin viajes · '}Promedio {fmtCOPfull(avgTotal)}
+                {(data.trips_excluded || data.personal_excluded) && `sin ${[data.trips_excluded && 'viajes', data.personal_excluded && 'gasto personal'].filter(Boolean).join(' ni ')} · `}Promedio {fmtCOPfull(avgTotal)}
                 {hasPartial && <span className="text-amber-500/80"> · ○ mes en curso (parcial)</span>}
               </span>
             </div>
@@ -1176,7 +1422,7 @@
                 <p className="text-[10px] text-gray-500 mt-2">
                   Usa el salario base; los bonos de enero y febrero se excluyen para no aplastar la escala.
                   Un mes sin barra es un mes cuya nómina aún no llega.
-                  {data.trips_excluded && ' Los viajes sí cuentan aquí (el dinero ya salió), aunque no aparezcan en los gráficos de gasto.'}
+                  {(data.trips_excluded || data.personal_excluded) && ' Los viajes y el gasto personal sí cuentan aquí (el dinero ya salió), aunque no aparezcan en los gráficos de gasto del hogar.'}
                 </p>
               </div>
             </section>
@@ -1196,10 +1442,10 @@
                     <YAxis stroke="#6b7280" fontSize={11} width={44} domain={[0, 100]}
                            ticks={[0, 25, 50, 75, 100]} tickFormatter={(v) => v + '%'} />
                     <Tooltip contentStyle={tipStyle}
-                             formatter={(v, n, p) => [`${v}%  (${fmtCOP(n === 'Fijos' ? p.payload.fijosCop : n === 'Viajes' ? p.payload.viajesCop : p.payload.varCop)})`, n]}
+                             formatter={(v, n, p) => [`${v}%  (${fmtCOP(n === 'Fijos' ? p.payload.fijosCop : n === 'Viajes' ? p.payload.viajesCop : n === 'Personal' ? p.payload.personalCop : p.payload.varCop)})`, n]}
                              labelFormatter={(m) => {
                                const r = vsIncome.find((x) => x.month === m);
-                               return `${m} · ingreso ${fmtCOP(r.ingreso)} · gasto ${(r.Fijos + r.Variables + r.Viajes).toFixed(0)}%`;
+                               return `${m} · ingreso ${fmtCOP(r.ingreso)} · gasto ${(r.Fijos + r.Variables + r.Viajes + r.Personal).toFixed(0)}%`;
                              }} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
                     <ReferenceLine y={100} stroke="#4b5563" strokeDasharray="4 4"
@@ -1208,6 +1454,8 @@
                     <Bar dataKey="Variables" stackId="i" fill="#38bdf8" isAnimationActive={false} />
                     {vsIncome.some((r) => r.Viajes > 0) &&
                       <Bar dataKey="Viajes" stackId="i" fill="#f59e0b" isAnimationActive={false} />}
+                    {vsIncome.some((r) => r.Personal > 0) &&
+                      <Bar dataKey="Personal" stackId="i" fill="#a78bfa" isAnimationActive={false} />}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -1458,6 +1706,7 @@
       const [note, setNote] = useState(tx.notes || '');
       const [addedBy, setAddedBy] = useState(tx.added_by || '');
       const [tripId, setTripId] = useState(tx.trip_id != null ? String(tx.trip_id) : '');
+      const [scope, setScope] = useState(tx.scope || '');
       const [submitting, setSubmitting] = useState(false);
       const tripOptions = useMemo(() => [
         { value: '', label: 'Ninguno (dashboard principal)' },
@@ -1503,6 +1752,10 @@
           await submit({ kind: 'trip', trip_id: tripId === '' ? null : parseInt(tripId, 10) });
           return;
         }
+        if (scope !== (tx.scope || '')) {
+          await submit({ kind: 'scope', scope: scope || null });
+          return;
+        }
         setToast?.({ type: 'ok', text: 'No hay cambios' });
         onClose();
       };
@@ -1542,6 +1795,10 @@
                 value={tx.trip_id
                   ? <span className="text-amber-300">✈ {tx.trip_name} <span className="text-gray-500 text-[10px]">({tx.trip_source === 'manual' ? 'a mano' : 'automático'})</span></span>
                   : <span className="text-gray-500">— (dashboard principal)</span>} />}
+              {!editing && <DetailRow label="Ámbito"
+                value={tx.scope
+                  ? <span className="text-violet-300 capitalize">👤 Personal — {tx.scope}</span>
+                  : <span className="text-gray-500">Hogar</span>} />}
               <DetailRow label="Origen" value={tx.source} />
               <DetailRow label="Pago" value={tx.payment_method || '—'} />
               {!editing && tx.notes && <DetailRow label="Notas" value={tx.notes} />}
@@ -1577,6 +1834,19 @@
                       <ChoiceSelect value={tripId} onChange={setTripId} options={tripOptions} />
                     </label>
                   )}
+
+                  <label className="block">
+                    <span className="text-[11px] uppercase tracking-wide text-gray-400 block mb-1">Ámbito (de quién es el gasto)</span>
+                    <ChoiceSelect value={scope} onChange={setScope}
+                      options={[
+                        { value: '',      label: 'Hogar' },
+                        { value: 'santi', label: 'Personal — Santi' },
+                        { value: 'lau',   label: 'Personal — Lau' },
+                      ]} />
+                    {tx.trip_id && scope && (
+                      <span className="text-[10px] text-amber-400/80 block mt-1">Este cargo está en un viaje: cuenta como viaje, no como personal.</span>
+                    )}
+                  </label>
 
                   <label className="block">
                     <span className="text-[11px] uppercase tracking-wide text-gray-400">Nota</span>
