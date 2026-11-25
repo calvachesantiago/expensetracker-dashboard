@@ -1056,7 +1056,9 @@
       const queued = pending['setting:allowance_pct'];             // value waiting for a Sync | undefined
       const pct = touched ? pctLocal : (queued ?? saved ?? 10);
       const isSet = saved !== undefined || queued !== undefined;
-      const dirty = touched && pctLocal !== (queued ?? saved);
+      // Show Guardar when the slider was moved off the stored value, OR when nothing is
+      // stored yet: the 10% preview must be savable without having to drag away and back.
+      const dirty = (touched && pctLocal !== (queued ?? saved)) || !isSet;
 
       // Household income for the month — base income only, so a bonus month
       // doesn't blow the allowance up (same rule as the Balance chart).
@@ -1078,7 +1080,7 @@
 
       const save = async () => {
         setBusy(true);
-        const ok = await postEdit({ kind: 'setting', key: 'allowance_pct', value: pctLocal });
+        const ok = await postEdit({ kind: 'setting', key: 'allowance_pct', value: pct });
         setBusy(false);
         if (ok) setTouched(false);
       };
@@ -1131,11 +1133,11 @@
                   <span className="text-gray-500">
                     {queued !== undefined ? `⏳ ${queued}% en cola — se aplica en la próxima sync`
                       : saved !== undefined ? `Guardado: ${saved}%${data.settings.allowance_pct.updated_by ? ` (por ${data.settings.allowance_pct.updated_by})` : ''}`
-                      : 'Aún sin definir — mueve el control y guarda'}
+                      : 'Aún sin guardar — esto es una vista previa; pulsa Guardar para fijarlo'}
                   </span>
                   {dirty
-                    ? <button onClick={save} disabled={busy} className="px-2.5 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-[11px] text-white">{busy ? 'Enviando…' : `Guardar ${pctLocal}%`}</button>
-                    : isSet ? null : <span className="text-amber-400/80">vista previa con {pct}%</span>}
+                    ? <button onClick={save} disabled={busy} className="px-2.5 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-[11px] text-white">{busy ? 'Enviando…' : `Guardar ${pct}%`}</button>
+                    : null}
                 </div>
               </div>
 
